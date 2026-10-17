@@ -1,0 +1,21 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: smart-cat-feeder-postgres
+    restart: unless-stopped
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    environment:
+      POSTGRES_DB: ${DB_NAME:-smart_cat_feeder}
+      POSTGRES_USER: ${DB_USER:-feeder}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-change_me}
+    volumes:
+      - smart_cat_feeder_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-feeder} -d ${DB_NAME:-smart_cat_feeder}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  smart_cat_feeder_postgres_data:
