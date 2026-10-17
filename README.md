@@ -46,3 +46,10 @@
 ## Репозиторий
 
 https://github.com/evgesha0-0/programming-of-mobile-devices
+
+## Техническая документация
+
+- [Архитектура системы](docs/architecture.md)
+- [Контракт REST API](docs/api.md)
+- [Логическая модель данных](docs/database.md)
+- [Процесс параллельной разработки](docs/workflow.md)
