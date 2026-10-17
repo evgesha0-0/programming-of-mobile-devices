@@ -53,3 +53,4 @@ https://github.com/evgesha0-0/programming-of-mobile-devices
 - [Контракт REST API](docs/api.md)
 - [Логическая модель данных](docs/database.md)
 - [Процесс параллельной разработки](docs/workflow.md)
+- [Интеграционное тестирование](docs/testing.md)
