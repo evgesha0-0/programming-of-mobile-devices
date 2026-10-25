@@ -6,6 +6,7 @@ export type DatabaseCheck = () => Promise<void>;
 
 export function createDatabasePool(config: DatabaseConfig): Pool {
   const poolConfig: PoolConfig = {
+    connectionTimeoutMillis: 5_000,
     host: config.host,
     port: config.port,
     database: config.database,
