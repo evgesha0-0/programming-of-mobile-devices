@@ -7,6 +7,8 @@ import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.text.InputType;
 import android.view.View;
 import android.view.WindowInsets;
@@ -33,6 +35,9 @@ public final class MainActivity extends Activity {
     private String page = "Кормушка";
     private String nextCursor;
     private final JSONArray history = new JSONArray();
+    private final Handler pollingHandler = new Handler(Looper.getMainLooper());
+    private FeedingPoller poller;
+    private boolean visible;
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
@@ -106,6 +111,7 @@ public final class MainActivity extends Activity {
                         device.getText().toString(), token.getText().toString(), BuildConfig.DEBUG);
                 preferences.edit().putString("server", updated.server).putString("device", updated.device).apply();
                 connection = updated;
+                restartPendingMonitor();
                 clearHistory();
                 page = "Кормушка";
                 notice.setText("Подключение сохранено. Нажмите «Обновить состояние».");
@@ -127,6 +133,19 @@ public final class MainActivity extends Activity {
         }));
         LinearLayout feeding = card("Ручное кормление");
         label(feeding, "Команда поступает на кормушку через сервер. Принятие команды ещё не означает выдачу корма.", 14, false);
+        label(feeding, "Результат обновляется автоматически, пока приложение открыто. При сворачивании проверка приостанавливается.", 13, false);
+        if (FeedingNotifications.enabled(this)) {
+            label(feeding, "Уведомления о результате включены", 13, false);
+        } else if (android.os.Build.VERSION.SDK_INT >= 33
+                && checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS)
+                != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            button(feeding, "Включить уведомления", () -> requestPermissions(
+                    new String[]{android.Manifest.permission.POST_NOTIFICATIONS}, 10));
+        } else {
+            label(feeding, "Системные уведомления выключены. Результат останется на экране.", 13, false);
+        }
+        String lastResult = preferences.getString("last-result:" + connection.storageKey(), null);
+        if (lastResult != null) label(feeding, lastResult, 14, false);
         EditText grams = input(feeding, "Порция, г", "40", InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_DECIMAL);
         button(feeding, "Выдать порцию", () -> {
             if (pending() != null) { showError("Сначала проверьте предыдущую команду"); return; }
@@ -155,18 +174,7 @@ public final class MainActivity extends Activity {
                 label(pendingCard, "Статус: " + feedingStatus(command.optString("status", "pending")), 17, true);
                 button(pendingCard, "Проверить результат", () -> execute(
                         () -> api().request("GET", "/feedings/" + feedingId, null), result -> {
-                            String resultStatus = result.getString("status");
-                            if ("completed".equals(resultStatus) && result.isNull("actual_grams"))
-                                throw new org.json.JSONException("Missing actual_grams");
-                            if (ManualCommand.terminal(resultStatus)) {
-                                preferences.edit().remove(pendingKey()).apply();
-                                render();
-                                notice.setText(getString(R.string.feeding_result, feedingStatus(resultStatus), value(result, "actual_grams")));
-                            } else {
-                                command.put("status", resultStatus);
-                                savePending(command);
-                                render();
-                            }
+                            acceptFeedingResult(command, FeedingResult.parse(feedingId, command.getString("command_id"), result));
                         }));
             }
             if (Instant.parse(command.optString("expires_at")).isBefore(Instant.now())) {
@@ -174,7 +182,8 @@ public final class MainActivity extends Activity {
                         .setTitle("Убрать команду?")
                         .setMessage("Это не отменяет команду на сервере. Перед новой подачей проверьте историю, чтобы не выдать лишнюю порцию.")
                         .setNegativeButton("Оставить", null).setPositiveButton("Убрать", (dialog, which) -> {
-                            preferences.edit().remove(pendingKey()).apply(); render();
+                            preferences.edit().remove(pendingKey()).apply();
+                            restartPendingMonitor(); render();
                         }).show());
             }
         }
@@ -189,6 +198,7 @@ public final class MainActivity extends Activity {
             saved.put("feeding_id", result.getString("feeding_id"));
             saved.put("status", result.getString("status"));
             savePending(saved);
+            restartPendingMonitor();
             render();
             notice.setText("Команда принята. Ожидаем результат от кормушки.");
         });
@@ -306,6 +316,65 @@ public final class MainActivity extends Activity {
         boolean saved = preferences.edit().putString(pendingKey(), command.toString()).commit();
         if (!saved) showError("Не удалось сохранить команду на телефоне. Проверьте историю перед новой подачей.");
         return saved;
+    }
+
+    private void restartPendingMonitor() {
+        if (poller != null) poller.stop();
+        poller = null;
+        if (!visible || connection == null) return;
+        JSONObject command = pending();
+        if (command == null || command.optString("feeding_id").isEmpty()
+                || command.optString("command_id").isEmpty()) return;
+        ConnectionSettings origin = connection;
+        String feedingId = command.optString("feeding_id");
+        String commandId = command.optString("command_id");
+        poller = new FeedingPoller(new FeedingPoller.Scheduler() {
+            @Override public void postDelayed(Runnable action, long delay) { pollingHandler.postDelayed(action, delay); }
+            @Override public void remove(Runnable action) { pollingHandler.removeCallbacks(action); }
+        }, worker, action -> pollingHandler.post(action), () -> FeedingResult.parse(feedingId, commandId,
+                new FeederApi(origin).request("GET", "/feedings/" + feedingId, null)), new FeedingPoller.Listener() {
+            @Override public void onResult(FeedingResult result) throws Exception {
+                if (connection != origin) return;
+                acceptFeedingResult(command, result);
+            }
+            @Override public void onError(Exception error) {
+                if (page.equals("Кормушка")) showError("Результат пока недоступен. Повторим проверку автоматически; новая команда не отправляется.");
+            }
+        }, () -> !busy);
+        poller.start();
+    }
+
+    private void acceptFeedingResult(JSONObject command, FeedingResult result) throws Exception {
+        JSONObject current = pending();
+        if (current == null || !command.getString("command_id").equals(current.optString("command_id"))) return;
+        // Запоздалый ответ не должен возвращать начавшуюся выдачу в очередь.
+        if ("running".equals(current.optString("status")) && "pending".equals(result.status)) return;
+        if (result.terminal()) {
+            String message = getString(R.string.feeding_result, feedingStatus(result.status),
+                    result.actualGrams == null ? "—" : result.actualGrams.toPlainString());
+            if (!preferences.edit().remove(pendingKey())
+                    .putString("last-result:" + connection.storageKey(), message).commit())
+                throw new java.io.IOException("Could not persist result");
+            if (poller != null) poller.stop();
+            FeedingNotifications.show(this, connection.storageKey(), result);
+            if (page.equals("Кормушка")) render();
+            notice.setText(message);
+        } else if (!result.status.equals(current.optString("status"))) {
+            current.put("status", result.status);
+            if (!savePending(current)) throw new java.io.IOException("Could not persist command status");
+            if (page.equals("Кормушка")) render();
+        }
+    }
+
+    @Override protected void onStart() { super.onStart(); visible = true; restartPendingMonitor(); }
+    @Override protected void onStop() {
+        visible = false;
+        if (poller != null) poller.stop();
+        super.onStop();
+    }
+    @Override public void onRequestPermissionsResult(int request, String[] permissions, int[] results) {
+        super.onRequestPermissionsResult(request, permissions, results);
+        if (request == 10 && page.equals("Кормушка")) render();
     }
 
     private interface Request { JSONObject run() throws Exception; }

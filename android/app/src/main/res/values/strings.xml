@@ -3,4 +3,11 @@
     <string name="last_seen">Последняя связь: %1$s</string>
     <string name="server_updated">Данные сервера на %1$s. Для обновления нажмите кнопку.</string>
     <string name="feeding_result">Результат: %1$s. Выдано: %2$s г</string>
+    <string name="notification_channel">Результаты кормления</string>
+    <string name="notification_completed">Корм выдан</string>
+    <string name="notification_failed">Ошибка кормления</string>
+    <string name="notification_expired">Срок команды истёк</string>
+    <string name="notification_mass">Кормушка подтвердила выдачу %1$s г</string>
+    <string name="notification_error">Кормушка сообщила об ошибке. Проверьте историю кормлений.</string>
+    <string name="notification_timeout">Сервер сообщил, что срок ожидания команды истёк.</string>
 </resources>
