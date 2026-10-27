@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">Smart Cat Feeder</string>
+    <string name="scaffold_message">Приложение готово к настройке подключения</string>
+</resources>
