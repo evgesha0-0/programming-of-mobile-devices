@@ -8,8 +8,15 @@ import type {
   DeviceStateUpdate,
   UpdatedDeviceStateRecord,
 } from '../src/devices/device.types.js';
+import type { ScheduleRepository } from '../src/schedules/schedule.repository.js';
 
 const deviceId = 'd6d174f4-e79f-49d1-9476-78bc99483752';
+const unusedScheduleRepository: ScheduleRepository = {
+  async list() { throw new Error('Schedule repository must not be used by device routes'); },
+  async create() { throw new Error('Schedule repository must not be used by device routes'); },
+  async update() { throw new Error('Schedule repository must not be used by device routes'); },
+  async delete() { throw new Error('Schedule repository must not be used by device routes'); },
+};
 
 function initialState(): DeviceStateRecord {
   return {
@@ -45,7 +52,11 @@ function repository(initial: DeviceStateRecord | null): DeviceRepository {
 }
 
 async function appWith(deviceRepository: DeviceRepository) {
-  return buildApp({ checkDatabase: async () => undefined, deviceRepository });
+  return buildApp({
+    checkDatabase: async () => undefined,
+    deviceRepository,
+    scheduleRepository: unusedScheduleRepository,
+  });
 }
 
 test('GET device state returns the documented representation', async (t) => {

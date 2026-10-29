@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import { buildApp } from '../src/app.js';
 import type { DeviceRepository } from '../src/devices/device.repository.js';
+import type { ScheduleRepository } from '../src/schedules/schedule.repository.js';
 
 const unusedDeviceRepository: DeviceRepository = {
   async findState() {
@@ -13,10 +14,18 @@ const unusedDeviceRepository: DeviceRepository = {
   },
 };
 
+const unusedScheduleRepository: ScheduleRepository = {
+  async list() { throw new Error('Schedule repository must not be used by health routes'); },
+  async create() { throw new Error('Schedule repository must not be used by health routes'); },
+  async update() { throw new Error('Schedule repository must not be used by health routes'); },
+  async delete() { throw new Error('Schedule repository must not be used by health routes'); },
+};
+
 test('Fastify application initializes without opening a network port', async (t) => {
   const app = await buildApp({
     checkDatabase: async () => undefined,
     deviceRepository: unusedDeviceRepository,
+    scheduleRepository: unusedScheduleRepository,
   });
   t.after(() => app.close());
 
@@ -32,6 +41,7 @@ test('GET /health reports that HTTP server is alive without checking PostgreSQL'
       databaseChecks += 1;
     },
     deviceRepository: unusedDeviceRepository,
+    scheduleRepository: unusedScheduleRepository,
   });
   t.after(() => app.close());
 
@@ -49,6 +59,7 @@ test('GET /ready reports connected PostgreSQL', async (t) => {
   const app = await buildApp({
     checkDatabase: async () => undefined,
     deviceRepository: unusedDeviceRepository,
+    scheduleRepository: unusedScheduleRepository,
   });
   t.after(() => app.close());
 
@@ -67,6 +78,7 @@ test('GET /ready returns 503 without exposing PostgreSQL error', async (t) => {
       throw new Error('postgresql-secret-error');
     },
     deviceRepository: unusedDeviceRepository,
+    scheduleRepository: unusedScheduleRepository,
   });
   t.after(() => app.close());
 

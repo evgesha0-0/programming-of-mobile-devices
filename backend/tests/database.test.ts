@@ -9,6 +9,7 @@ import { PGlite } from '@electric-sql/pglite';
 
 import { loadMigrations, runMigrations, type Migration, type MigrationConnection } from '../src/db/migrations.js';
 import { createDeviceRepository, type QueryExecutor } from '../src/devices/device.repository.js';
+import { createScheduleRepository, type TransactionClient, type TransactionPool } from '../src/schedules/schedule.repository.js';
 
 function client(db: PGlite): MigrationConnection {
   return {
@@ -202,4 +203,60 @@ test('device repository reads state and only accepts a newer report', async (t) 
   });
   assert.equal(stale, null);
   assert.equal((await repository.findState(id))?.status, 'online');
+});
+
+test('schedule repository changes rows and device revision in one transaction', async (t) => {
+  const db = new PGlite(); t.after(() => db.close()); await runMigrations(client(db));
+  const deviceId = await device(db);
+  const connection: TransactionClient = {
+    async query<R>(sql: string, values?: readonly unknown[]) {
+      if (/^(BEGIN|COMMIT|ROLLBACK)$/.test(sql)) {
+        await db.exec(sql);
+        return { rows: [] as R[] };
+      }
+      return db.query<R>(sql, values ? [...values] : undefined);
+    },
+    release() {},
+  };
+  const database: TransactionPool = {
+    query: connection.query.bind(connection),
+    async connect() { return connection; },
+  };
+  const repository = createScheduleRepository(database);
+  const scheduleId = randomUUID();
+  const values = {
+    timeLocal: '08:30:00',
+    daysOfWeek: ['mon', 'wed'] as const,
+    timezone: 'Asia/Vladivostok',
+    portionGrams: 45.5,
+    active: true,
+  };
+
+  const created = await repository.create(deviceId, scheduleId, { ...values, daysOfWeek: [...values.daysOfWeek] });
+  assert.equal(created?.revision, '1');
+  assert.equal((await repository.list(deviceId))?.scheduleRevision, '1');
+
+  const updated = await repository.update(deviceId, scheduleId, {
+    ...values,
+    daysOfWeek: [...values.daysOfWeek],
+    timeLocal: '09:00:00',
+    active: false,
+  });
+  assert.equal(updated?.revision, '2');
+  assert.equal(updated?.timeLocal, '09:00:00');
+
+  assert.equal(await repository.update(deviceId, randomUUID(), {
+    ...values, daysOfWeek: [...values.daysOfWeek],
+  }), null);
+  assert.equal((await repository.list(deviceId))?.scheduleRevision, '2');
+
+  await assert.rejects(repository.create(deviceId, randomUUID(), {
+    ...values, daysOfWeek: [...values.daysOfWeek], portionGrams: 0,
+  }));
+  assert.equal((await repository.list(deviceId))?.scheduleRevision, '2');
+
+  const deleted = await repository.delete(deviceId, scheduleId);
+  assert.equal(deleted?.scheduleRevision, '3');
+  assert.deepEqual((await repository.list(deviceId))?.items, []);
+  assert.equal((await db.query('SELECT * FROM schedules WHERE schedule_id = $1', [scheduleId])).rows.length, 1);
 });
