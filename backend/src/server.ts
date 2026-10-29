@@ -6,6 +6,7 @@ import {
   createDatabasePool,
 } from './db/connection.js';
 import { createDeviceRepository } from './devices/device.repository.js';
+import { createScheduleRepository } from './schedules/schedule.repository.js';
 
 async function start(): Promise<void> {
   const env = loadEnv();
@@ -13,6 +14,7 @@ async function start(): Promise<void> {
   const app = await buildApp({
     checkDatabase: () => checkDatabaseConnection(pool),
     deviceRepository: createDeviceRepository(pool),
+    scheduleRepository: createScheduleRepository(pool),
     logger: { level: env.logLevel },
   });
   let shuttingDown = false;
