@@ -41,8 +41,27 @@ interface DeletedScheduleResponse {
   deleted_at: string;
 }
 
+interface ScheduleSyncItemResponse {
+  schedule_id: string;
+  time_local: string;
+  days_of_week: DayOfWeek[];
+  timezone: string;
+  portion_grams: number;
+  active: boolean;
+  updated_at: string;
+  deleted_at: string | null;
+}
+
+interface ScheduleSyncResponse {
+  device_id: string;
+  schedule_revision: number;
+  generated_at: string;
+  items: ScheduleSyncItemResponse[];
+}
+
 export interface ScheduleService {
   list(deviceId: string): Promise<ScheduleListResponse>;
+  sync(deviceId: string, knownRevision: number): Promise<ScheduleSyncResponse>;
   create(deviceId: string, input: ScheduleInput): Promise<ScheduleResponse>;
   update(deviceId: string, scheduleId: string, input: ScheduleInput): Promise<ScheduleResponse>;
   delete(deviceId: string, scheduleId: string): Promise<DeletedScheduleResponse>;
@@ -57,6 +76,26 @@ export function createScheduleService(repository: ScheduleRepository): ScheduleS
         device_id: deviceId,
         schedule_revision: toJsonInteger(result.scheduleRevision),
         items: result.items.map(toItemResponse),
+      };
+    },
+
+    async sync(deviceId, _knownRevision) {
+      const result = await repository.sync(deviceId);
+      if (!result) throw deviceNotFound();
+      return {
+        device_id: deviceId,
+        schedule_revision: toJsonInteger(result.scheduleRevision),
+        generated_at: result.generatedAt.toISOString(),
+        items: result.items.map((schedule) => ({
+          schedule_id: schedule.scheduleId,
+          time_local: schedule.timeLocal,
+          days_of_week: schedule.daysOfWeek,
+          timezone: schedule.timezone,
+          portion_grams: Number(schedule.portionGrams),
+          active: schedule.active,
+          updated_at: schedule.updatedAt.toISOString(),
+          deleted_at: schedule.deletedAt?.toISOString() ?? null,
+        })),
       };
     },
 

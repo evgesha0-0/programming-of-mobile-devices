@@ -11,6 +11,10 @@ interface ScheduleParams extends DeviceParams {
   schedule_id: string;
 }
 
+interface SyncQuery {
+  known_revision: number;
+}
+
 const uuidSchema = { type: 'string', format: 'uuid' } as const;
 
 const deviceParamsSchema = {
@@ -115,12 +119,74 @@ const deleteResponseSchema = {
   },
 } as const;
 
+const syncQuerySchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['known_revision'],
+  properties: {
+    known_revision: { type: 'integer', minimum: 0, maximum: Number.MAX_SAFE_INTEGER },
+  },
+} as const;
+
+const syncResponseSchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['device_id', 'schedule_revision', 'generated_at', 'items'],
+  properties: {
+    device_id: uuidSchema,
+    schedule_revision: { type: 'integer', minimum: 0 },
+    generated_at: { type: 'string', format: 'date-time' },
+    items: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: [
+          'schedule_id',
+          'time_local',
+          'days_of_week',
+          'timezone',
+          'portion_grams',
+          'active',
+          'updated_at',
+          'deleted_at',
+        ],
+        properties: {
+          schedule_id: uuidSchema,
+          time_local: { type: 'string' },
+          days_of_week: { type: 'array', items: { type: 'string', enum: daysOfWeek } },
+          timezone: { type: 'string' },
+          portion_grams: { type: 'number' },
+          active: { type: 'boolean' },
+          updated_at: { type: 'string', format: 'date-time' },
+          deleted_at: { type: ['string', 'null'], format: 'date-time' },
+        },
+      },
+    },
+  },
+} as const;
+
 export function createScheduleRoutes(scheduleService: ScheduleService): FastifyPluginAsync {
   return async (fastify): Promise<void> => {
     fastify.get<{ Params: DeviceParams }>(
       '/api/v1/devices/:device_id/schedules',
       { schema: { params: deviceParamsSchema, response: { 200: scheduleListResponseSchema } } },
       async (request) => scheduleService.list(request.params.device_id),
+    );
+
+    fastify.get<{ Params: DeviceParams; Querystring: SyncQuery }>(
+      '/api/v1/devices/:device_id/sync/schedules',
+      {
+        schema: {
+          params: deviceParamsSchema,
+          querystring: syncQuerySchema,
+          response: { 200: syncResponseSchema },
+        },
+      },
+      async (request) => scheduleService.sync(
+        request.params.device_id,
+        request.query.known_revision,
+      ),
     );
 
     fastify.post<{ Params: DeviceParams; Body: ScheduleInput }>(

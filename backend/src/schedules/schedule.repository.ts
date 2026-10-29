@@ -6,6 +6,7 @@ import type {
   DeletedScheduleRecord,
   ScheduleListRecord,
   ScheduleRecord,
+  ScheduleSyncRecord,
   ScheduleValues,
 } from './schedule.types.js';
 
@@ -19,6 +20,7 @@ export interface TransactionPool extends QueryExecutor {
 
 export interface ScheduleRepository {
   list(deviceId: string): Promise<ScheduleListRecord | null>;
+  sync(deviceId: string): Promise<ScheduleSyncRecord | null>;
   create(deviceId: string, scheduleId: string, values: ScheduleValues): Promise<ScheduleRecord | null>;
   update(deviceId: string, scheduleId: string, values: ScheduleValues): Promise<ScheduleRecord | null>;
   delete(deviceId: string, scheduleId: string): Promise<DeletedScheduleRecord | null>;
@@ -46,6 +48,22 @@ interface DeletedScheduleRow extends QueryResultRow {
   schedule_id: string;
   revision: string | number;
   deleted_at: Date | string;
+}
+
+interface ScheduleSyncRow extends QueryResultRow {
+  schedule_revision: string | number;
+  generated_at: Date | string;
+  schedule_id: string | null;
+  device_id: string | null;
+  time_local: string | null;
+  days_of_week: DayOfWeek[] | null;
+  timezone: string | null;
+  portion_grams: string | number | null;
+  active: boolean | null;
+  revision: string | number | null;
+  created_at: Date | string | null;
+  updated_at: Date | string | null;
+  deleted_at: Date | string | null;
 }
 
 const scheduleColumns = `
@@ -83,6 +101,38 @@ export function createScheduleRepository(database: TransactionPool): ScheduleRep
       return {
         scheduleRevision: String(revision.schedule_revision),
         items: schedules.rows.map(mapSchedule),
+      };
+    },
+
+    async sync(deviceId) {
+      const result = await database.query<ScheduleSyncRow>(
+        `SELECT
+           d.schedule_revision,
+           now() AS generated_at,
+           s.schedule_id,
+           s.device_id,
+           s.time_local::text,
+           s.days_of_week,
+           s.timezone,
+           s.portion_grams,
+           s.active,
+           s.revision,
+           s.created_at,
+           s.updated_at,
+           s.deleted_at
+         FROM devices d
+         LEFT JOIN schedules s ON s.device_id = d.device_id
+         WHERE d.device_id = $1
+         ORDER BY s.revision, s.schedule_id`,
+        [deviceId],
+      );
+      const first = result.rows[0];
+      if (!first) return null;
+
+      return {
+        scheduleRevision: String(first.schedule_revision),
+        generatedAt: toDate(first.generated_at),
+        items: result.rows.flatMap((row) => row.schedule_id === null ? [] : [mapSyncSchedule(row)]),
       };
     },
 
@@ -230,6 +280,37 @@ function mapSchedule(row: ScheduleRow): ScheduleRecord {
     updatedAt: toDate(row.updated_at),
     deletedAt: row.deleted_at === null ? null : toDate(row.deleted_at),
   };
+}
+
+function mapSyncSchedule(row: ScheduleSyncRow): ScheduleRecord {
+  if (
+    row.schedule_id === null
+    || row.device_id === null
+    || row.time_local === null
+    || row.days_of_week === null
+    || row.timezone === null
+    || row.portion_grams === null
+    || row.active === null
+    || row.revision === null
+    || row.created_at === null
+    || row.updated_at === null
+  ) {
+    throw new Error('Database returned an incomplete schedule snapshot');
+  }
+
+  return mapSchedule({
+    ...row,
+    schedule_id: row.schedule_id,
+    device_id: row.device_id,
+    time_local: row.time_local,
+    days_of_week: row.days_of_week,
+    timezone: row.timezone,
+    portion_grams: row.portion_grams,
+    active: row.active,
+    revision: row.revision,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  });
 }
 
 function toDate(value: Date | string): Date {

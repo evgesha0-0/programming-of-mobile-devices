@@ -29,6 +29,10 @@ export interface ScheduleListRecord {
   items: ScheduleRecord[];
 }
 
+export interface ScheduleSyncRecord extends ScheduleListRecord {
+  generatedAt: Date;
+}
+
 export interface DeletedScheduleRecord {
   scheduleId: string;
   scheduleRevision: string;
