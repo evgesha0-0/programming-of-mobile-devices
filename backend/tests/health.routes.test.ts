@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { buildApp } from '../src/app.js';
+import type { CommandRepository } from '../src/commands/command.repository.js';
 import type { DeviceRepository } from '../src/devices/device.repository.js';
 import type { ScheduleRepository } from '../src/schedules/schedule.repository.js';
 
@@ -12,6 +13,10 @@ const unusedDeviceRepository: DeviceRepository = {
   async updateStateIfNewer() {
     throw new Error('Device repository must not be used by health routes');
   },
+};
+
+const unusedCommandRepository: CommandRepository = {
+  async create() { throw new Error('Command repository must not be used by health routes'); },
 };
 
 const unusedScheduleRepository: ScheduleRepository = {
@@ -25,6 +30,7 @@ const unusedScheduleRepository: ScheduleRepository = {
 test('Fastify application initializes without opening a network port', async (t) => {
   const app = await buildApp({
     checkDatabase: async () => undefined,
+    commandRepository: unusedCommandRepository,
     deviceRepository: unusedDeviceRepository,
     scheduleRepository: unusedScheduleRepository,
   });
@@ -41,6 +47,7 @@ test('GET /health reports that HTTP server is alive without checking PostgreSQL'
     checkDatabase: async () => {
       databaseChecks += 1;
     },
+    commandRepository: unusedCommandRepository,
     deviceRepository: unusedDeviceRepository,
     scheduleRepository: unusedScheduleRepository,
   });
@@ -59,6 +66,7 @@ test('GET /health reports that HTTP server is alive without checking PostgreSQL'
 test('GET /ready reports connected PostgreSQL', async (t) => {
   const app = await buildApp({
     checkDatabase: async () => undefined,
+    commandRepository: unusedCommandRepository,
     deviceRepository: unusedDeviceRepository,
     scheduleRepository: unusedScheduleRepository,
   });
@@ -78,6 +86,7 @@ test('GET /ready returns 503 without exposing PostgreSQL error', async (t) => {
     checkDatabase: async () => {
       throw new Error('postgresql-secret-error');
     },
+    commandRepository: unusedCommandRepository,
     deviceRepository: unusedDeviceRepository,
     scheduleRepository: unusedScheduleRepository,
   });

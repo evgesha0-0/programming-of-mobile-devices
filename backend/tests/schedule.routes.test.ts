@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { buildApp } from '../src/app.js';
+import type { CommandRepository } from '../src/commands/command.repository.js';
 import type { DeviceRepository } from '../src/devices/device.repository.js';
 import type { ScheduleRepository } from '../src/schedules/schedule.repository.js';
 import type { ScheduleRecord, ScheduleValues } from '../src/schedules/schedule.types.js';
@@ -10,6 +11,9 @@ const deviceId = 'd6d174f4-e79f-49d1-9476-78bc99483752';
 const missingDeviceId = '4d6b9594-9278-4621-88f3-876b3d127fd8';
 const missingScheduleId = 'ee681479-a7cf-4afb-b7a7-ddc70bb22120';
 const now = new Date('2026-10-29T02:00:00Z');
+const unusedCommandRepository: CommandRepository = {
+  async create() { throw new Error('Command repository must not be used by schedule routes'); },
+};
 
 const unusedDeviceRepository: DeviceRepository = {
   async findState() { throw new Error('Device repository must not be used by schedule routes'); },
@@ -75,6 +79,7 @@ function memoryRepository(): ScheduleRepository {
 async function appWith(repository = memoryRepository()) {
   return buildApp({
     checkDatabase: async () => undefined,
+    commandRepository: unusedCommandRepository,
     deviceRepository: unusedDeviceRepository,
     scheduleRepository: repository,
   });

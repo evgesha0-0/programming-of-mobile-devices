@@ -7,6 +7,7 @@ import { pathToFileURL } from 'node:url';
 import test from 'node:test';
 import { PGlite } from '@electric-sql/pglite';
 
+import { createCommandRepository, type CommandDatabase } from '../src/commands/command.repository.js';
 import { loadMigrations, runMigrations, type Migration, type MigrationConnection } from '../src/db/migrations.js';
 import { createDeviceRepository, type QueryExecutor } from '../src/devices/device.repository.js';
 import { createScheduleRepository, type TransactionClient, type TransactionPool } from '../src/schedules/schedule.repository.js';
@@ -18,6 +19,24 @@ function client(db: PGlite): MigrationConnection {
       await db.exec(sql);
       return { rows: [] };
     },
+  };
+}
+
+function transactionalDatabase(db: PGlite): TransactionPool & CommandDatabase {
+  const connection: TransactionClient = {
+    async query<R>(sql: string, values?: readonly unknown[]) {
+      if (/^(BEGIN|COMMIT|ROLLBACK)$/.test(sql)) {
+        await db.exec(sql);
+        return { rows: [] as R[] };
+      }
+      return db.query<R>(sql, values ? [...values] : undefined);
+    },
+    release() {},
+  };
+
+  return {
+    query: connection.query.bind(connection),
+    async connect() { return connection; },
   };
 }
 
@@ -208,20 +227,7 @@ test('device repository reads state and only accepts a newer report', async (t) 
 test('schedule repository changes rows and device revision in one transaction', async (t) => {
   const db = new PGlite(); t.after(() => db.close()); await runMigrations(client(db));
   const deviceId = await device(db);
-  const connection: TransactionClient = {
-    async query<R>(sql: string, values?: readonly unknown[]) {
-      if (/^(BEGIN|COMMIT|ROLLBACK)$/.test(sql)) {
-        await db.exec(sql);
-        return { rows: [] as R[] };
-      }
-      return db.query<R>(sql, values ? [...values] : undefined);
-    },
-    release() {},
-  };
-  const database: TransactionPool = {
-    query: connection.query.bind(connection),
-    async connect() { return connection; },
-  };
+  const database = transactionalDatabase(db);
   const repository = createScheduleRepository(database);
   const scheduleId = randomUUID();
   const values = {
@@ -271,4 +277,52 @@ test('schedule repository changes rows and device revision in one transaction', 
   assert.ok(snapshot?.items[0]?.deletedAt);
   assert.ok(snapshot?.generatedAt instanceof Date);
   assert.equal(await repository.sync(randomUUID()), null);
+});
+
+test('manual command repository creates command and feeding atomically with idempotency', async (t) => {
+  const db = new PGlite(); t.after(() => db.close()); await runMigrations(client(db));
+  const deviceId = await device(db);
+  const otherDeviceId = await device(db);
+  const repository = createCommandRepository(transactionalDatabase(db));
+  const commandId = randomUUID();
+  const feedingId = randomUUID();
+  const values = {
+    commandId,
+    feedingId,
+    deviceId,
+    portionGrams: 40,
+    createdAt: new Date('2026-10-29T03:00:00Z'),
+    expiresAt: new Date('2026-10-29T03:05:00Z'),
+  };
+
+  const created = await repository.create(values);
+  assert.equal(created.kind, 'created');
+  assert.equal(created.kind === 'created' && created.command.feedingId, feedingId);
+  assert.equal((await db.query('SELECT * FROM feeding_commands')).rows.length, 1);
+  assert.equal((await db.query('SELECT * FROM feedings')).rows.length, 1);
+
+  const repeated = await repository.create({
+    ...values,
+    feedingId: randomUUID(),
+    createdAt: new Date('2026-10-29T04:00:00Z'),
+  });
+  assert.equal(repeated.kind, 'repeated');
+  assert.equal(repeated.kind === 'repeated' && repeated.command.feedingId, feedingId);
+  assert.equal((await db.query('SELECT * FROM feeding_commands')).rows.length, 1);
+  assert.equal((await db.query('SELECT * FROM feedings')).rows.length, 1);
+
+  assert.equal((await repository.create({ ...values, portionGrams: 50 })).kind, 'conflict');
+  assert.equal((await repository.create({ ...values, deviceId: otherDeviceId })).kind, 'conflict');
+  assert.equal((await repository.create({
+    ...values,
+    commandId: randomUUID(),
+    feedingId: randomUUID(),
+    createdAt: values.expiresAt,
+  })).kind, 'invalid_expiry');
+  assert.equal((await repository.create({
+    ...values,
+    commandId: randomUUID(),
+    feedingId: randomUUID(),
+    deviceId: randomUUID(),
+  })).kind, 'device_not_found');
 });

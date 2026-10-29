@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { buildApp } from '../src/app.js';
+import type { CommandRepository } from '../src/commands/command.repository.js';
 import type { DeviceRepository } from '../src/devices/device.repository.js';
 import type {
   DeviceStateRecord,
@@ -11,6 +12,9 @@ import type {
 import type { ScheduleRepository } from '../src/schedules/schedule.repository.js';
 
 const deviceId = 'd6d174f4-e79f-49d1-9476-78bc99483752';
+const unusedCommandRepository: CommandRepository = {
+  async create() { throw new Error('Command repository must not be used by device routes'); },
+};
 const unusedScheduleRepository: ScheduleRepository = {
   async list() { throw new Error('Schedule repository must not be used by device routes'); },
   async sync() { throw new Error('Schedule repository must not be used by device routes'); },
@@ -55,6 +59,7 @@ function repository(initial: DeviceStateRecord | null): DeviceRepository {
 async function appWith(deviceRepository: DeviceRepository) {
   return buildApp({
     checkDatabase: async () => undefined,
+    commandRepository: unusedCommandRepository,
     deviceRepository,
     scheduleRepository: unusedScheduleRepository,
   });
