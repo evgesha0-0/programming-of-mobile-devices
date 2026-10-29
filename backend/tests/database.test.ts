@@ -8,6 +8,7 @@ import test from 'node:test';
 import { PGlite } from '@electric-sql/pglite';
 
 import { loadMigrations, runMigrations, type Migration, type MigrationConnection } from '../src/db/migrations.js';
+import { createDeviceRepository, type QueryExecutor } from '../src/devices/device.repository.js';
 
 function client(db: PGlite): MigrationConnection {
   return {
@@ -160,4 +161,45 @@ test('completed feeding requires weight and finish time, with history linked to 
   await db.query('UPDATE schedules SET deleted_at = now() WHERE schedule_id = $1', [scheduleId]);
   assert.equal((await db.query('SELECT * FROM feedings WHERE feeding_id = $1', [feedingId])).rows.length, 1);
   await assert.rejects(db.query('DELETE FROM schedules WHERE schedule_id = $1', [scheduleId]), /foreign key/);
+});
+
+test('device repository reads state and only accepts a newer report', async (t) => {
+  const db = new PGlite(); t.after(() => db.close()); await runMigrations(client(db));
+  const id = await device(db);
+  const repository = createDeviceRepository({
+    async query<R>(sql: string, values?: readonly unknown[]) {
+      return db.query<R>(sql, values ? [...values] : undefined);
+    },
+  } satisfies QueryExecutor);
+
+  assert.deepEqual(await repository.findState(id), {
+    deviceId: id,
+    status: 'unknown',
+    firmwareVersion: null,
+    lastSeenAt: null,
+    scheduleRevision: '0',
+    lastErrorCode: null,
+    lastErrorMessage: null,
+  });
+
+  const first = await repository.updateStateIfNewer(id, {
+    status: 'online',
+    reportedAt: new Date('2026-10-29T01:00:00Z'),
+    firmwareVersion: '0.2.0',
+    errorCode: null,
+    errorMessage: null,
+  });
+  assert.equal(first?.status, 'online');
+  assert.ok(first?.lastSeenAt);
+  assert.equal(first.lastSeenAt.toISOString(), '2026-10-29T01:00:00.000Z');
+
+  const stale = await repository.updateStateIfNewer(id, {
+    status: 'error',
+    reportedAt: new Date('2026-10-29T00:59:59Z'),
+    firmwareVersion: '0.2.0',
+    errorCode: 'MOTOR_ERROR',
+    errorMessage: 'Motor is blocked',
+  });
+  assert.equal(stale, null);
+  assert.equal((await repository.findState(id))?.status, 'online');
 });

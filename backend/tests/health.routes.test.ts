@@ -2,9 +2,22 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { buildApp } from '../src/app.js';
+import type { DeviceRepository } from '../src/devices/device.repository.js';
+
+const unusedDeviceRepository: DeviceRepository = {
+  async findState() {
+    throw new Error('Device repository must not be used by health routes');
+  },
+  async updateStateIfNewer() {
+    throw new Error('Device repository must not be used by health routes');
+  },
+};
 
 test('Fastify application initializes without opening a network port', async (t) => {
-  const app = await buildApp({ checkDatabase: async () => undefined });
+  const app = await buildApp({
+    checkDatabase: async () => undefined,
+    deviceRepository: unusedDeviceRepository,
+  });
   t.after(() => app.close());
 
   await app.ready();
@@ -18,6 +31,7 @@ test('GET /health reports that HTTP server is alive without checking PostgreSQL'
     checkDatabase: async () => {
       databaseChecks += 1;
     },
+    deviceRepository: unusedDeviceRepository,
   });
   t.after(() => app.close());
 
@@ -32,7 +46,10 @@ test('GET /health reports that HTTP server is alive without checking PostgreSQL'
 });
 
 test('GET /ready reports connected PostgreSQL', async (t) => {
-  const app = await buildApp({ checkDatabase: async () => undefined });
+  const app = await buildApp({
+    checkDatabase: async () => undefined,
+    deviceRepository: unusedDeviceRepository,
+  });
   t.after(() => app.close());
 
   const response = await app.inject({ method: 'GET', url: '/ready' });
@@ -49,6 +66,7 @@ test('GET /ready returns 503 without exposing PostgreSQL error', async (t) => {
     checkDatabase: async () => {
       throw new Error('postgresql-secret-error');
     },
+    deviceRepository: unusedDeviceRepository,
   });
   t.after(() => app.close());
 

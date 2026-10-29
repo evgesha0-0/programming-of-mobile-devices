@@ -5,12 +5,14 @@ import {
   closeDatabase,
   createDatabasePool,
 } from './db/connection.js';
+import { createDeviceRepository } from './devices/device.repository.js';
 
 async function start(): Promise<void> {
   const env = loadEnv();
   const pool = createDatabasePool(env.database);
   const app = await buildApp({
     checkDatabase: () => checkDatabaseConnection(pool),
+    deviceRepository: createDeviceRepository(pool),
     logger: { level: env.logLevel },
   });
   let shuttingDown = false;
