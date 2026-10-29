@@ -1,4 +1,5 @@
 import { buildApp } from './app.js';
+import { createCommandRepository } from './commands/command.repository.js';
 import { loadEnv } from './config/env.js';
 import {
   checkDatabaseConnection,
@@ -13,6 +14,7 @@ async function start(): Promise<void> {
   const pool = createDatabasePool(env.database);
   const app = await buildApp({
     checkDatabase: () => checkDatabaseConnection(pool),
+    commandRepository: createCommandRepository(pool),
     deviceRepository: createDeviceRepository(pool),
     scheduleRepository: createScheduleRepository(pool),
     logger: { level: env.logLevel },
