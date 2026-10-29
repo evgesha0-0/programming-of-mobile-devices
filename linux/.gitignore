@@ -5,6 +5,11 @@ data/
 *.db
 *.db-shm
 *.db-wal
+*.db.lock
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.sqlite.lock
 *.log
 .env
 .env.*
