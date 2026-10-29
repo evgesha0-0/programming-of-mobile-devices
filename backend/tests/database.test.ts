@@ -232,6 +232,10 @@ test('schedule repository changes rows and device revision in one transaction', 
     active: true,
   };
 
+  const emptySnapshot = await repository.sync(deviceId);
+  assert.equal(emptySnapshot?.scheduleRevision, '0');
+  assert.deepEqual(emptySnapshot?.items, []);
+
   const created = await repository.create(deviceId, scheduleId, { ...values, daysOfWeek: [...values.daysOfWeek] });
   assert.equal(created?.revision, '1');
   assert.equal((await repository.list(deviceId))?.scheduleRevision, '1');
@@ -259,4 +263,12 @@ test('schedule repository changes rows and device revision in one transaction', 
   assert.equal(deleted?.scheduleRevision, '3');
   assert.deepEqual((await repository.list(deviceId))?.items, []);
   assert.equal((await db.query('SELECT * FROM schedules WHERE schedule_id = $1', [scheduleId])).rows.length, 1);
+
+  const snapshot = await repository.sync(deviceId);
+  assert.equal(snapshot?.scheduleRevision, '3');
+  assert.equal(snapshot?.items.length, 1);
+  assert.equal(snapshot?.items[0]?.scheduleId, scheduleId);
+  assert.ok(snapshot?.items[0]?.deletedAt);
+  assert.ok(snapshot?.generatedAt instanceof Date);
+  assert.equal(await repository.sync(randomUUID()), null);
 });

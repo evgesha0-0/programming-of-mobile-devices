@@ -16,6 +16,7 @@ const unusedDeviceRepository: DeviceRepository = {
 
 const unusedScheduleRepository: ScheduleRepository = {
   async list() { throw new Error('Schedule repository must not be used by health routes'); },
+  async sync() { throw new Error('Schedule repository must not be used by health routes'); },
   async create() { throw new Error('Schedule repository must not be used by health routes'); },
   async update() { throw new Error('Schedule repository must not be used by health routes'); },
   async delete() { throw new Error('Schedule repository must not be used by health routes'); },

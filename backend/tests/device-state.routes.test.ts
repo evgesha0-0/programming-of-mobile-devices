@@ -13,6 +13,7 @@ import type { ScheduleRepository } from '../src/schedules/schedule.repository.js
 const deviceId = 'd6d174f4-e79f-49d1-9476-78bc99483752';
 const unusedScheduleRepository: ScheduleRepository = {
   async list() { throw new Error('Schedule repository must not be used by device routes'); },
+  async sync() { throw new Error('Schedule repository must not be used by device routes'); },
   async create() { throw new Error('Schedule repository must not be used by device routes'); },
   async update() { throw new Error('Schedule repository must not be used by device routes'); },
   async delete() { throw new Error('Schedule repository must not be used by device routes'); },

@@ -28,6 +28,14 @@ function memoryRepository(): ScheduleRepository {
         items: [...schedules.values()].filter((item) => item.deletedAt === null),
       };
     },
+    async sync(id) {
+      if (id !== deviceId) return null;
+      return {
+        scheduleRevision: String(revision),
+        generatedAt: new Date('2026-10-29T02:15:00Z'),
+        items: [...schedules.values()],
+      };
+    },
     async create(id, scheduleId, values) {
       if (id !== deviceId) return null;
       revision += 1;
@@ -164,6 +172,63 @@ test('schedule routes distinguish an unknown device and schedule', async (t) => 
   });
   assert.equal(missingSchedule.statusCode, 404);
   assert.equal(missingSchedule.json().error.code, 'NOT_FOUND');
+});
+
+test('schedule sync returns a full snapshot with tombstones', async (t) => {
+  const app = await appWith();
+  t.after(() => app.close());
+
+  const first = await app.inject({
+    method: 'POST', url: `/api/v1/devices/${deviceId}/schedules`, payload: validSchedule,
+  });
+  const firstId = first.json().schedule_id;
+  const second = await app.inject({
+    method: 'POST',
+    url: `/api/v1/devices/${deviceId}/schedules`,
+    payload: { ...validSchedule, time_local: '19:30:00' },
+  });
+  const secondId = second.json().schedule_id;
+  await app.inject({
+    method: 'DELETE', url: `/api/v1/devices/${deviceId}/schedules/${firstId}`,
+  });
+
+  const response = await app.inject({
+    method: 'GET',
+    url: `/api/v1/devices/${deviceId}/sync/schedules?known_revision=3`,
+  });
+
+  assert.equal(response.statusCode, 200);
+  assert.equal(response.json().schedule_revision, 3);
+  assert.equal(response.json().generated_at, '2026-10-29T02:15:00.000Z');
+  assert.equal(response.json().items.length, 2);
+  assert.equal(
+    response.json().items.find((item: { schedule_id: string }) => item.schedule_id === firstId).deleted_at,
+    '2026-10-29T02:10:00.000Z',
+  );
+  assert.equal(
+    response.json().items.find((item: { schedule_id: string }) => item.schedule_id === secondId).deleted_at,
+    null,
+  );
+});
+
+test('schedule sync validates known_revision and returns not found for an unknown device', async (t) => {
+  const app = await appWith();
+  t.after(() => app.close());
+
+  for (const query of ['', '?known_revision=-1', '?known_revision=1.5', '?known_revision=unknown', '?known_revision=1&extra=1']) {
+    const response = await app.inject({
+      method: 'GET', url: `/api/v1/devices/${deviceId}/sync/schedules${query}`,
+    });
+    assert.equal(response.statusCode, 400, query);
+    assert.equal(response.json().error.code, 'VALIDATION_ERROR');
+  }
+
+  const missing = await app.inject({
+    method: 'GET',
+    url: `/api/v1/devices/${missingDeviceId}/sync/schedules?known_revision=0`,
+  });
+  assert.equal(missing.statusCode, 404);
+  assert.equal(missing.json().error.code, 'NOT_FOUND');
 });
 
 function record(scheduleId: string, values: ScheduleValues, revision: number): ScheduleRecord {
