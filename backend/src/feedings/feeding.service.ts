@@ -2,6 +2,7 @@ import { ConflictError, NotFoundError } from '../utils/http-error.js';
 import type { FeedingRepository } from './feeding.repository.js';
 import type {
   FeedingHistoryCursor,
+  FeedingHistoryItemRecord,
   FeedingSource,
   FeedingStatus,
   ScheduledFeedingStatus,
@@ -70,7 +71,12 @@ export interface FeedingHistoryResponse {
   next_cursor: string | null;
 }
 
+export interface FeedingDetailsResponse extends FeedingHistoryItemResponse {
+  error_message: string | null;
+}
+
 export interface FeedingService {
+  getDetails(deviceId: string, feedingId: string): Promise<FeedingDetailsResponse>;
   listHistory(
     deviceId: string,
     limit: number,
@@ -84,25 +90,20 @@ export interface FeedingService {
 
 export function createFeedingService(repository: FeedingRepository): FeedingService {
   return {
+    async getDetails(deviceId, feedingId) {
+      const result = await repository.find(deviceId, feedingId);
+      if (!result) throw new NotFoundError('Кормление не найдено');
+      return {
+        ...toHistoryItemResponse(result),
+        error_message: result.errorMessage,
+      };
+    },
     async listHistory(deviceId, limit, cursorValue) {
       const cursor = cursorValue === undefined ? null : decodeCursor(cursorValue, deviceId);
       const result = await repository.list(deviceId, limit, cursor);
       if (!result) throw new NotFoundError('Устройство не найдено');
       return {
-        items: result.items.map((item) => ({
-          feeding_id: item.feedingId,
-          device_id: item.deviceId,
-          schedule_id: item.scheduleId,
-          command_id: item.commandId,
-          source: item.source,
-          portion_grams: Number(item.portionGrams),
-          actual_grams: item.actualGrams === null ? null : Number(item.actualGrams),
-          status: item.status,
-          created_at: item.createdAt.toISOString(),
-          started_at: item.startedAt?.toISOString() ?? null,
-          finished_at: item.finishedAt?.toISOString() ?? null,
-          error_code: item.errorCode,
-        })),
+        items: result.items.map(toHistoryItemResponse),
         next_cursor: result.nextCursor === null
           ? null
           : encodeCursor(result.nextCursor, deviceId),
@@ -145,6 +146,23 @@ export function createFeedingService(repository: FeedingRepository): FeedingServ
         },
       };
     },
+  };
+}
+
+function toHistoryItemResponse(item: FeedingHistoryItemRecord): FeedingHistoryItemResponse {
+  return {
+    feeding_id: item.feedingId,
+    device_id: item.deviceId,
+    schedule_id: item.scheduleId,
+    command_id: item.commandId,
+    source: item.source,
+    portion_grams: Number(item.portionGrams),
+    actual_grams: item.actualGrams === null ? null : Number(item.actualGrams),
+    status: item.status,
+    created_at: item.createdAt.toISOString(),
+    started_at: item.startedAt?.toISOString() ?? null,
+    finished_at: item.finishedAt?.toISOString() ?? null,
+    error_code: item.errorCode,
   };
 }
 

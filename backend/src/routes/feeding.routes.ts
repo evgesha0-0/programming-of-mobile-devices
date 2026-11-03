@@ -9,6 +9,10 @@ interface DeviceParams {
   device_id: string;
 }
 
+interface FeedingParams extends DeviceParams {
+  feeding_id: string;
+}
+
 interface FeedingHistoryQuery {
   limit?: number;
   cursor?: string;
@@ -23,6 +27,16 @@ const deviceParamsSchema = {
   },
 } as const;
 
+const feedingParamsSchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['device_id', 'feeding_id'],
+  properties: {
+    device_id: { type: 'string', format: 'uuid' },
+    feeding_id: { type: 'string', format: 'uuid' },
+  },
+} as const;
+
 const historyQuerySchema = {
   type: 'object',
   additionalProperties: false,
@@ -34,6 +48,39 @@ const historyQuerySchema = {
 
 const nullableDateTime = { type: ['string', 'null'], format: 'date-time' } as const;
 
+const historyItemRequired = [
+  'feeding_id',
+  'device_id',
+  'schedule_id',
+  'command_id',
+  'source',
+  'portion_grams',
+  'actual_grams',
+  'status',
+  'created_at',
+  'started_at',
+  'finished_at',
+  'error_code',
+] as const;
+
+const historyItemProperties = {
+  feeding_id: { type: 'string', format: 'uuid' },
+  device_id: { type: 'string', format: 'uuid' },
+  schedule_id: { type: ['string', 'null'], format: 'uuid' },
+  command_id: { type: ['string', 'null'], format: 'uuid' },
+  source: { type: 'string', enum: ['manual', 'scheduled'] },
+  portion_grams: { type: 'number' },
+  actual_grams: { type: ['number', 'null'] },
+  status: {
+    type: 'string',
+    enum: ['pending', 'running', 'completed', 'failed', 'expired'],
+  },
+  created_at: { type: 'string', format: 'date-time' },
+  started_at: nullableDateTime,
+  finished_at: nullableDateTime,
+  error_code: { type: ['string', 'null'] },
+} as const;
+
 const historyResponseSchema = {
   type: 'object',
   additionalProperties: false,
@@ -44,40 +91,21 @@ const historyResponseSchema = {
       items: {
         type: 'object',
         additionalProperties: false,
-        required: [
-          'feeding_id',
-          'device_id',
-          'schedule_id',
-          'command_id',
-          'source',
-          'portion_grams',
-          'actual_grams',
-          'status',
-          'created_at',
-          'started_at',
-          'finished_at',
-          'error_code',
-        ],
-        properties: {
-          feeding_id: { type: 'string', format: 'uuid' },
-          device_id: { type: 'string', format: 'uuid' },
-          schedule_id: { type: ['string', 'null'], format: 'uuid' },
-          command_id: { type: ['string', 'null'], format: 'uuid' },
-          source: { type: 'string', enum: ['manual', 'scheduled'] },
-          portion_grams: { type: 'number' },
-          actual_grams: { type: ['number', 'null'] },
-          status: {
-            type: 'string',
-            enum: ['pending', 'running', 'completed', 'failed', 'expired'],
-          },
-          created_at: { type: 'string', format: 'date-time' },
-          started_at: nullableDateTime,
-          finished_at: nullableDateTime,
-          error_code: { type: ['string', 'null'] },
-        },
+        required: historyItemRequired,
+        properties: historyItemProperties,
       },
     },
     next_cursor: { type: ['string', 'null'] },
+  },
+} as const;
+
+const feedingDetailsResponseSchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: [...historyItemRequired, 'error_message'],
+  properties: {
+    ...historyItemProperties,
+    error_message: { type: ['string', 'null'] },
   },
 } as const;
 
@@ -187,6 +215,20 @@ export function createFeedingRoutes(feedingService: FeedingService): FastifyPlug
         request.params.device_id,
         request.query.limit ?? 50,
         request.query.cursor,
+      ),
+    );
+
+    fastify.get<{ Params: FeedingParams }>(
+      '/api/v1/devices/:device_id/feedings/:feeding_id',
+      {
+        schema: {
+          params: feedingParamsSchema,
+          response: { 200: feedingDetailsResponseSchema },
+        },
+      },
+      async (request) => feedingService.getDetails(
+        request.params.device_id,
+        request.params.feeding_id,
       ),
     );
 

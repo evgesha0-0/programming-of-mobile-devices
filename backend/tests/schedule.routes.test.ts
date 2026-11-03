@@ -25,6 +25,7 @@ const unusedDeviceRepository: DeviceRepository = {
 };
 const unusedFeedingRepository: FeedingRepository = {
   async createScheduledEvent() { throw new Error('Feeding repository must not be used by schedule routes'); },
+  async find() { throw new Error('Feeding repository must not be used by schedule routes'); },
   async list() { throw new Error('Feeding repository must not be used by schedule routes'); },
 };
 

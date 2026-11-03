@@ -707,4 +707,20 @@ test('scheduled feeding repository accepts offline events idempotently', async (
     ]),
   );
   assert.equal(await repository.list(randomUUID(), 50, null), null);
+
+  const completedDetails = await repository.find(deviceId, values.feedingId);
+  assert.equal(completedDetails?.source, 'scheduled');
+  assert.equal(completedDetails?.scheduleId, scheduleId);
+  assert.equal(completedDetails?.commandId, null);
+  assert.equal(Number(completedDetails?.actualGrams), 39.5);
+  assert.equal(completedDetails?.errorMessage, null);
+
+  const failedDetails = failed.kind === 'created'
+    ? await repository.find(deviceId, failed.event.feedingId)
+    : null;
+  assert.equal(failedDetails?.status, 'failed');
+  assert.equal(failedDetails?.errorCode, 'MOTOR_ERROR');
+  assert.equal(failedDetails?.errorMessage, 'Motor is blocked');
+  assert.equal(await repository.find(randomUUID(), values.feedingId), null);
+  assert.equal(await repository.find(deviceId, randomUUID()), null);
 });

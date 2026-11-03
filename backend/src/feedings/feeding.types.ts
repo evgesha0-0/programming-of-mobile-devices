@@ -54,6 +54,10 @@ export interface FeedingHistoryItemRecord {
   errorCode: string | null;
 }
 
+export interface FeedingDetailsRecord extends FeedingHistoryItemRecord {
+  errorMessage: string | null;
+}
+
 export interface FeedingHistoryPageRecord {
   items: FeedingHistoryItemRecord[];
   nextCursor: FeedingHistoryCursor | null;

@@ -65,6 +65,7 @@ function memoryRepository(): FeedingRepository {
     async createScheduledEvent() {
       throw new Error('Scheduled events must not be used by history tests');
     },
+    async find() { throw new Error('Feeding details must not be used by history tests'); },
     async list(id, limit, cursor) {
       if (id !== deviceId) return null;
       const start = cursor === null

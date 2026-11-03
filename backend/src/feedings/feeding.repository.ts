@@ -3,6 +3,7 @@ import type { QueryResultRow } from 'pg';
 import type { QueryExecutor } from '../devices/device.repository.js';
 import type {
   CreateScheduledFeedingEventResult,
+  FeedingDetailsRecord,
   FeedingHistoryCursor,
   FeedingHistoryItemRecord,
   FeedingHistoryPageRecord,
@@ -30,6 +31,7 @@ export interface FeedingRepository {
     limit: number,
     cursor: FeedingHistoryCursor | null,
   ): Promise<FeedingHistoryPageRecord | null>;
+  find(deviceId: string, feedingId: string): Promise<FeedingDetailsRecord | null>;
 }
 
 interface ScheduledFeedingRow extends QueryResultRow {
@@ -64,8 +66,36 @@ interface FeedingHistoryRow extends QueryResultRow {
   error_code: string | null;
 }
 
+interface FeedingDetailsRow extends FeedingHistoryRow {
+  error_message: string | null;
+}
+
 export function createFeedingRepository(database: FeedingDatabase): FeedingRepository {
   return {
+    async find(deviceId, feedingId) {
+      const result = await database.query<FeedingDetailsRow>(
+        `SELECT
+           feeding_id,
+           device_id,
+           schedule_id,
+           command_id,
+           source,
+           portion_grams,
+           actual_grams,
+           status,
+           created_at,
+           created_at::text AS cursor_created_at,
+           started_at,
+           finished_at,
+           error_code,
+           error_message
+         FROM feedings
+         WHERE device_id = $1 AND feeding_id = $2`,
+        [deviceId, feedingId],
+      );
+      const row = result.rows[0];
+      return row ? { ...toHistoryItem(row), errorMessage: row.error_message } : null;
+    },
     async list(deviceId, limit, cursor) {
       const device = await database.query(
         'SELECT device_id FROM devices WHERE device_id = $1',
