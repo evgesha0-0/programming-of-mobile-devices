@@ -86,6 +86,50 @@ function memoryRepository(): CommandRepository {
         },
       };
     },
+    async acknowledge(values) {
+      if (values.deviceId !== deviceId) return { kind: 'not_found' };
+      const command = commands.get(values.commandId);
+      if (!command) return { kind: 'not_found' };
+      if (command.feedingId !== values.feedingId) return { kind: 'conflict' };
+      if (command.status === 'running') {
+        return command.startedAt?.getTime() === values.startedAt.getTime()
+          ? {
+              kind: 'acknowledged',
+              command: {
+                commandId: command.commandId,
+                feedingId: command.feedingId,
+                status: 'running',
+                startedAt: values.startedAt,
+              },
+            }
+          : { kind: 'conflict' };
+      }
+      if (command.status !== 'pending') return { kind: 'conflict' };
+      if (command.expiresAt <= serverTime) {
+        commands.set(command.commandId, {
+          ...command,
+          status: 'expired',
+          finishedAt: serverTime,
+        });
+        return { kind: 'conflict' };
+      }
+      if (values.startedAt < command.createdAt) return { kind: 'invalid_started_at' };
+
+      commands.set(command.commandId, {
+        ...command,
+        status: 'running',
+        startedAt: values.startedAt,
+      });
+      return {
+        kind: 'acknowledged',
+        command: {
+          commandId: command.commandId,
+          feedingId: command.feedingId,
+          status: 'running',
+          startedAt: values.startedAt,
+        },
+      };
+    },
   };
 }
 
@@ -260,6 +304,126 @@ test('pending commands return not found for an unknown device', async (t) => {
 
   assert.equal(response.statusCode, 404);
   assert.equal(response.json().error.code, 'NOT_FOUND');
+});
+
+test('command acknowledgment moves a pending command to running and is idempotent', async (t) => {
+  const app = await appWith();
+  t.after(() => app.close());
+  const created = await app.inject({
+    method: 'POST',
+    url: `/api/v1/devices/${deviceId}/feeding-commands`,
+    payload: validCommand,
+  });
+  const acknowledgment = {
+    feeding_id: created.json().feeding_id,
+    status: 'running',
+    started_at: '2090-01-01T00:00:00Z',
+  };
+
+  const first = await app.inject({
+    method: 'POST',
+    url: `/api/v1/devices/${deviceId}/commands/${commandId}/ack`,
+    payload: acknowledgment,
+  });
+  assert.equal(first.statusCode, 200);
+  assert.deepEqual(first.json(), {
+    command_id: commandId,
+    feeding_id: created.json().feeding_id,
+    status: 'running',
+    started_at: '2090-01-01T00:00:00.000Z',
+  });
+
+  const repeated = await app.inject({
+    method: 'POST',
+    url: `/api/v1/devices/${deviceId}/commands/${commandId}/ack`,
+    payload: acknowledgment,
+  });
+  assert.equal(repeated.statusCode, 200);
+  assert.deepEqual(repeated.json(), first.json());
+});
+
+test('command acknowledgment rejects mismatched identity and conflicting repeats', async (t) => {
+  const app = await appWith();
+  t.after(() => app.close());
+  const created = await app.inject({
+    method: 'POST',
+    url: `/api/v1/devices/${deviceId}/feeding-commands`,
+    payload: validCommand,
+  });
+  const acknowledgment = {
+    feeding_id: created.json().feeding_id,
+    status: 'running',
+    started_at: '2090-01-01T00:00:00Z',
+  };
+
+  const wrongFeeding = await app.inject({
+    method: 'POST',
+    url: `/api/v1/devices/${deviceId}/commands/${commandId}/ack`,
+    payload: { ...acknowledgment, feeding_id: 'ebc2fd74-7272-4c9e-a416-bdffde906913' },
+  });
+  assert.equal(wrongFeeding.statusCode, 409);
+  assert.equal(wrongFeeding.json().error.code, 'CONFLICT');
+
+  const accepted = await app.inject({
+    method: 'POST',
+    url: `/api/v1/devices/${deviceId}/commands/${commandId}/ack`,
+    payload: acknowledgment,
+  });
+  assert.equal(accepted.statusCode, 200);
+
+  const conflictingRepeat = await app.inject({
+    method: 'POST',
+    url: `/api/v1/devices/${deviceId}/commands/${commandId}/ack`,
+    payload: { ...acknowledgment, started_at: '2090-01-01T00:00:01Z' },
+  });
+  assert.equal(conflictingRepeat.statusCode, 409);
+  assert.equal(conflictingRepeat.json().error.code, 'CONFLICT');
+});
+
+test('command acknowledgment validates request and returns not found', async (t) => {
+  const app = await appWith();
+  t.after(() => app.close());
+  const created = await app.inject({
+    method: 'POST',
+    url: `/api/v1/devices/${deviceId}/feeding-commands`,
+    payload: validCommand,
+  });
+  const body = {
+    feeding_id: created.json().feeding_id,
+    status: 'running',
+    started_at: '2090-01-01T00:00:00Z',
+  };
+
+  for (const payload of [
+    { ...body, feeding_id: 'not-a-uuid' },
+    { ...body, status: 'pending' },
+    { ...body, started_at: 'not-a-date' },
+    { ...body, extra: true },
+  ]) {
+    const response = await app.inject({
+      method: 'POST',
+      url: `/api/v1/devices/${deviceId}/commands/${commandId}/ack`,
+      payload,
+    });
+    assert.equal(response.statusCode, 400, JSON.stringify(payload));
+    assert.equal(response.json().error.code, 'VALIDATION_ERROR');
+  }
+
+  const invalidStartedAt = await app.inject({
+    method: 'POST',
+    url: `/api/v1/devices/${deviceId}/commands/${commandId}/ack`,
+    payload: { ...body, started_at: '2000-01-01T00:00:00Z' },
+  });
+  assert.equal(invalidStartedAt.statusCode, 400);
+  assert.equal(invalidStartedAt.json().error.code, 'VALIDATION_ERROR');
+
+  const missing = await app.inject({
+    method: 'POST',
+    url: `/api/v1/devices/${deviceId}/commands/693df286-f089-463e-848d-5a19f7027449/ack`,
+    payload: body,
+  });
+  assert.equal(missing.statusCode, 404);
+  assert.equal(missing.json().error.code, 'NOT_FOUND');
 });
 
 function sameCommand(command: ManualCommandRecord, values: ManualCommandValues): boolean {

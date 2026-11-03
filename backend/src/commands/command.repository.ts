@@ -2,6 +2,9 @@ import type { QueryResultRow } from 'pg';
 
 import type { QueryExecutor } from '../devices/device.repository.js';
 import type {
+  AcknowledgeCommandResult,
+  AcknowledgeCommandValues,
+  AcknowledgedCommandRecord,
   CreateManualCommandResult,
   FeedingStatus,
   ListPendingCommandsResult,
@@ -21,6 +24,7 @@ export interface CommandDatabase extends QueryExecutor {
 export interface CommandRepository {
   create(values: ManualCommandValues): Promise<CreateManualCommandResult>;
   listPending(deviceId: string, limit: number): Promise<ListPendingCommandsResult>;
+  acknowledge(values: AcknowledgeCommandValues): Promise<AcknowledgeCommandResult>;
 }
 
 interface InsertedCommandRow extends QueryResultRow {
@@ -50,6 +54,17 @@ interface PendingCommandRow extends QueryResultRow {
   status: 'pending' | null;
   created_at: Date | string | null;
   expires_at: Date | string | null;
+}
+
+interface AcknowledgeCommandRow extends QueryResultRow {
+  feeding_id: string;
+  status: FeedingStatus;
+  created_at: Date | string;
+  expires_at: Date | string;
+  started_at: Date | string | null;
+  feeding_status: FeedingStatus;
+  feeding_started_at: Date | string | null;
+  server_time: Date | string;
 }
 
 export function createCommandRepository(database: CommandDatabase): CommandRepository {
@@ -210,6 +225,111 @@ export function createCommandRepository(database: CommandDatabase): CommandRepos
         client.release();
       }
     },
+
+    async acknowledge(values) {
+      const client = await database.connect();
+      try {
+        await client.query('BEGIN');
+        const result = await client.query<AcknowledgeCommandRow>(
+          `SELECT
+             command.feeding_id,
+             command.status,
+             command.created_at,
+             command.expires_at,
+             command.started_at,
+             feeding.status AS feeding_status,
+             feeding.started_at AS feeding_started_at,
+             now() AS server_time
+           FROM feeding_commands AS command
+           JOIN feedings AS feeding
+             ON feeding.device_id = command.device_id
+            AND feeding.command_id = command.command_id
+            AND feeding.feeding_id = command.feeding_id
+           WHERE command.device_id = $1 AND command.command_id = $2
+           FOR UPDATE OF command, feeding`,
+          [values.deviceId, values.commandId],
+        );
+        const row = result.rows[0];
+        if (!row) {
+          await client.query('COMMIT');
+          return { kind: 'not_found' };
+        }
+
+        if (row.feeding_id !== values.feedingId) {
+          await client.query('COMMIT');
+          return { kind: 'conflict' };
+        }
+
+        if (row.status === 'running') {
+          const commandStartedAt = nullableDate(row.started_at);
+          const feedingStartedAt = nullableDate(row.feeding_started_at);
+          const exactRepeat = row.feeding_status === 'running'
+            && commandStartedAt?.getTime() === values.startedAt.getTime()
+            && feedingStartedAt?.getTime() === values.startedAt.getTime();
+          await client.query('COMMIT');
+          return exactRepeat
+            ? { kind: 'acknowledged', command: acknowledgedRecord(values) }
+            : { kind: 'conflict' };
+        }
+
+        if (row.status !== 'pending' || row.feeding_status !== 'pending') {
+          await client.query('COMMIT');
+          return { kind: 'conflict' };
+        }
+
+        if (toDate(row.expires_at) <= toDate(row.server_time)) {
+          await client.query(
+            `UPDATE feeding_commands
+             SET status = 'expired', finished_at = now()
+             WHERE device_id = $1 AND command_id = $2 AND status = 'pending'`,
+            [values.deviceId, values.commandId],
+          );
+          await client.query(
+            `UPDATE feedings
+             SET status = 'expired', finished_at = now()
+             WHERE device_id = $1 AND feeding_id = $2 AND status = 'pending'`,
+            [values.deviceId, values.feedingId],
+          );
+          await client.query('COMMIT');
+          return { kind: 'conflict' };
+        }
+
+        if (values.startedAt < toDate(row.created_at)) {
+          await client.query('COMMIT');
+          return { kind: 'invalid_started_at' };
+        }
+
+        const updatedCommand = await client.query(
+          `UPDATE feeding_commands
+           SET status = 'running', started_at = $3
+           WHERE device_id = $1 AND command_id = $2 AND status = 'pending'
+           RETURNING command_id`,
+          [values.deviceId, values.commandId, values.startedAt],
+        );
+        const updatedFeeding = await client.query(
+          `UPDATE feedings
+           SET status = 'running', started_at = $3
+           WHERE device_id = $1 AND feeding_id = $2 AND status = 'pending'
+           RETURNING feeding_id`,
+          [values.deviceId, values.feedingId, values.startedAt],
+        );
+        if (updatedCommand.rows.length !== 1 || updatedFeeding.rows.length !== 1) {
+          throw new Error('Database did not acknowledge the manual command consistently');
+        }
+
+        await client.query('COMMIT');
+        return { kind: 'acknowledged', command: acknowledgedRecord(values) };
+      } catch (error) {
+        try {
+          await client.query('ROLLBACK');
+        } catch {
+          // Preserve the original database error.
+        }
+        throw error;
+      } finally {
+        client.release();
+      }
+    },
   };
 }
 
@@ -283,6 +403,19 @@ function mapPending(row: PendingCommandRow): PendingCommandRecord {
     createdAt: toDate(row.created_at),
     expiresAt: toDate(row.expires_at),
   };
+}
+
+function acknowledgedRecord(values: AcknowledgeCommandValues): AcknowledgedCommandRecord {
+  return {
+    commandId: values.commandId,
+    feedingId: values.feedingId,
+    status: 'running',
+    startedAt: values.startedAt,
+  };
+}
+
+function nullableDate(value: Date | string | null): Date | null {
+  return value === null ? null : toDate(value);
 }
 
 function requireCommand(command: ManualCommandRecord | null): ManualCommandRecord {

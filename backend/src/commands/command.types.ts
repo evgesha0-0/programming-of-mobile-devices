@@ -38,6 +38,26 @@ export interface PendingCommandListRecord {
   items: PendingCommandRecord[];
 }
 
+export interface AcknowledgeCommandValues {
+  deviceId: string;
+  commandId: string;
+  feedingId: string;
+  startedAt: Date;
+}
+
+export interface AcknowledgedCommandRecord {
+  commandId: string;
+  feedingId: string;
+  status: 'running';
+  startedAt: Date;
+}
+
+export type AcknowledgeCommandResult =
+  | { kind: 'acknowledged'; command: AcknowledgedCommandRecord }
+  | { kind: 'not_found' }
+  | { kind: 'conflict' }
+  | { kind: 'invalid_started_at' };
+
 export type ListPendingCommandsResult =
   | { kind: 'found'; commands: PendingCommandListRecord }
   | { kind: 'device_not_found' };

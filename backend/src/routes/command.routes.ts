@@ -1,6 +1,7 @@
 import type { FastifyPluginAsync } from 'fastify';
 
 import type {
+  AcknowledgeCommandInput,
   CommandService,
   CreateManualCommandInput,
 } from '../commands/command.service.js';
@@ -13,12 +14,26 @@ interface PendingCommandQuery {
   limit?: number;
 }
 
+interface CommandParams extends DeviceParams {
+  command_id: string;
+}
+
 const deviceParamsSchema = {
   type: 'object',
   additionalProperties: false,
   required: ['device_id'],
   properties: {
     device_id: { type: 'string', format: 'uuid' },
+  },
+} as const;
+
+const commandParamsSchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['device_id', 'command_id'],
+  properties: {
+    device_id: { type: 'string', format: 'uuid' },
+    command_id: { type: 'string', format: 'uuid' },
   },
 } as const;
 
@@ -119,6 +134,29 @@ const pendingCommandResponseSchema = {
   },
 } as const;
 
+const acknowledgeCommandBodySchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['feeding_id', 'status', 'started_at'],
+  properties: {
+    feeding_id: { type: 'string', format: 'uuid' },
+    status: { type: 'string', const: 'running' },
+    started_at: { type: 'string', format: 'date-time' },
+  },
+} as const;
+
+const acknowledgeCommandResponseSchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['command_id', 'feeding_id', 'status', 'started_at'],
+  properties: {
+    command_id: { type: 'string', format: 'uuid' },
+    feeding_id: { type: 'string', format: 'uuid' },
+    status: { type: 'string', const: 'running' },
+    started_at: { type: 'string', format: 'date-time' },
+  },
+} as const;
+
 export function createCommandRoutes(commandService: CommandService): FastifyPluginAsync {
   return async (fastify): Promise<void> => {
     fastify.get<{ Params: DeviceParams; Querystring: PendingCommandQuery }>(
@@ -133,6 +171,22 @@ export function createCommandRoutes(commandService: CommandService): FastifyPlug
       async (request) => commandService.listPending(
         request.params.device_id,
         request.query.limit ?? 10,
+      ),
+    );
+
+    fastify.post<{ Params: CommandParams; Body: AcknowledgeCommandInput }>(
+      '/api/v1/devices/:device_id/commands/:command_id/ack',
+      {
+        schema: {
+          params: commandParamsSchema,
+          body: acknowledgeCommandBodySchema,
+          response: { 200: acknowledgeCommandResponseSchema },
+        },
+      },
+      async (request) => commandService.acknowledge(
+        request.params.device_id,
+        request.params.command_id,
+        request.body,
       ),
     );
 

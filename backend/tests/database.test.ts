@@ -408,4 +408,102 @@ test('manual command repository creates command and feeding atomically with idem
     'pending',
   );
   assert.equal((await repository.listPending(randomUUID(), 10)).kind, 'device_not_found');
+
+  const ackDeviceId = await device(db);
+  const ackCommandId = randomUUID();
+  const ackFeedingId = randomUUID();
+  await repository.create({
+    commandId: ackCommandId,
+    feedingId: ackFeedingId,
+    deviceId: ackDeviceId,
+    portionGrams: 40,
+    createdAt: new Date('2090-01-01T00:00:00Z'),
+    expiresAt: new Date('2099-01-01T00:05:00Z'),
+  });
+  const acknowledgment = {
+    commandId: ackCommandId,
+    feedingId: ackFeedingId,
+    deviceId: ackDeviceId,
+    startedAt: new Date('2090-01-01T00:00:10Z'),
+  };
+
+  const acknowledged = await repository.acknowledge(acknowledgment);
+  assert.equal(acknowledged.kind, 'acknowledged');
+  assert.deepEqual(await repository.acknowledge(acknowledgment), acknowledged);
+  assert.equal((await repository.acknowledge({
+    ...acknowledgment,
+    feedingId: randomUUID(),
+  })).kind, 'conflict');
+  assert.equal((await repository.acknowledge({
+    ...acknowledgment,
+    startedAt: new Date('2090-01-01T00:00:11Z'),
+  })).kind, 'conflict');
+
+  const runningRows = await db.query<{
+    command_status: string;
+    feeding_status: string;
+    command_started: Date | null;
+    feeding_started: Date | null;
+  }>(
+    `SELECT
+       c.status AS command_status,
+       f.status AS feeding_status,
+       c.started_at AS command_started,
+       f.started_at AS feeding_started
+     FROM feeding_commands c
+     JOIN feedings f ON f.feeding_id = c.feeding_id
+     WHERE c.command_id = $1`,
+    [ackCommandId],
+  );
+  assert.equal(runningRows.rows[0]?.command_status, 'running');
+  assert.equal(runningRows.rows[0]?.feeding_status, 'running');
+  assert.deepEqual(runningRows.rows[0]?.command_started, acknowledgment.startedAt);
+  assert.deepEqual(runningRows.rows[0]?.feeding_started, acknowledgment.startedAt);
+
+  const invalidStartedCommandId = randomUUID();
+  const invalidStartedFeedingId = randomUUID();
+  await repository.create({
+    commandId: invalidStartedCommandId,
+    feedingId: invalidStartedFeedingId,
+    deviceId: ackDeviceId,
+    portionGrams: 25,
+    createdAt: new Date('2090-02-01T00:00:00Z'),
+    expiresAt: new Date('2099-02-01T00:05:00Z'),
+  });
+  assert.equal((await repository.acknowledge({
+    commandId: invalidStartedCommandId,
+    feedingId: invalidStartedFeedingId,
+    deviceId: ackDeviceId,
+    startedAt: new Date('2090-01-31T23:59:59Z'),
+  })).kind, 'invalid_started_at');
+
+  const expiredAckCommandId = randomUUID();
+  const expiredAckFeedingId = randomUUID();
+  await repository.create({
+    commandId: expiredAckCommandId,
+    feedingId: expiredAckFeedingId,
+    deviceId: ackDeviceId,
+    portionGrams: 20,
+    createdAt: new Date('2000-02-01T00:00:00Z'),
+    expiresAt: new Date('2000-02-01T00:05:00Z'),
+  });
+  assert.equal((await repository.acknowledge({
+    commandId: expiredAckCommandId,
+    feedingId: expiredAckFeedingId,
+    deviceId: ackDeviceId,
+    startedAt: new Date('2000-02-01T00:04:00Z'),
+  })).kind, 'conflict');
+  const expiredAckRows = await db.query<{ command_status: string; feeding_status: string }>(
+    `SELECT c.status AS command_status, f.status AS feeding_status
+     FROM feeding_commands c
+     JOIN feedings f ON f.feeding_id = c.feeding_id
+     WHERE c.command_id = $1`,
+    [expiredAckCommandId],
+  );
+  assert.equal(expiredAckRows.rows[0]?.command_status, 'expired');
+  assert.equal(expiredAckRows.rows[0]?.feeding_status, 'expired');
+  assert.equal((await repository.acknowledge({
+    ...acknowledgment,
+    commandId: randomUUID(),
+  })).kind, 'not_found');
 });

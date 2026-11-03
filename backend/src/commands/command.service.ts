@@ -45,12 +45,30 @@ export interface PendingCommandListResponse {
   server_time: string;
 }
 
+export interface AcknowledgeCommandInput {
+  feeding_id: string;
+  status: 'running';
+  started_at: string;
+}
+
+export interface AcknowledgeCommandResponse {
+  command_id: string;
+  feeding_id: string;
+  status: 'running';
+  started_at: string;
+}
+
 export interface CommandService {
   create(
     deviceId: string,
     input: CreateManualCommandInput,
   ): Promise<CreateManualCommandResponse>;
   listPending(deviceId: string, limit: number): Promise<PendingCommandListResponse>;
+  acknowledge(
+    deviceId: string,
+    commandId: string,
+    input: AcknowledgeCommandInput,
+  ): Promise<AcknowledgeCommandResponse>;
 }
 
 export function createCommandService(
@@ -91,6 +109,26 @@ export function createCommandService(
         server_time: result.commands.serverTime.toISOString(),
       };
     },
+
+    async acknowledge(deviceId, commandId, input) {
+      const result = await repository.acknowledge({
+        deviceId,
+        commandId,
+        feedingId: input.feeding_id,
+        startedAt: new Date(input.started_at),
+      });
+      if (result.kind === 'not_found') throw new NotFoundError('Команда не найдена');
+      if (result.kind === 'conflict') {
+        throw new ConflictError('Команда не может быть подтверждена в текущем состоянии');
+      }
+      if (result.kind === 'invalid_started_at') throw new InvalidStartedAtError();
+      return {
+        command_id: result.command.commandId,
+        feeding_id: result.command.feedingId,
+        status: result.command.status,
+        started_at: result.command.startedAt.toISOString(),
+      };
+    },
   };
 }
 
@@ -128,6 +166,14 @@ class InvalidExpiryError extends Error {
 
   constructor() {
     super('Поле expires_at должно быть позже времени создания команды');
+  }
+}
+
+class InvalidStartedAtError extends Error {
+  readonly validation = [{ instancePath: '/started_at', message: 'must not precede command creation' }];
+
+  constructor() {
+    super('Поле started_at не может быть раньше времени создания команды');
   }
 }
 
