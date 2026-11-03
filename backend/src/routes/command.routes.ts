@@ -4,6 +4,7 @@ import type {
   AcknowledgeCommandInput,
   CommandService,
   CreateManualCommandInput,
+  ManualFeedingResultInput,
 } from '../commands/command.service.js';
 
 interface DeviceParams {
@@ -16,6 +17,10 @@ interface PendingCommandQuery {
 
 interface CommandParams extends DeviceParams {
   command_id: string;
+}
+
+interface FeedingParams extends DeviceParams {
+  feeding_id: string;
 }
 
 const deviceParamsSchema = {
@@ -34,6 +39,16 @@ const commandParamsSchema = {
   properties: {
     device_id: { type: 'string', format: 'uuid' },
     command_id: { type: 'string', format: 'uuid' },
+  },
+} as const;
+
+const feedingParamsSchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['device_id', 'feeding_id'],
+  properties: {
+    device_id: { type: 'string', format: 'uuid' },
+    feeding_id: { type: 'string', format: 'uuid' },
   },
 } as const;
 
@@ -157,6 +172,83 @@ const acknowledgeCommandResponseSchema = {
   },
 } as const;
 
+const manualResultBaseProperties = {
+  command_id: { type: 'string', format: 'uuid' },
+  source: { type: 'string', const: 'manual' },
+  portion_grams: {
+    type: 'number',
+    exclusiveMinimum: 0,
+    maximum: 999_999.99,
+    multipleOf: 0.01,
+  },
+  started_at: { type: 'string', format: 'date-time' },
+  finished_at: { type: 'string', format: 'date-time' },
+} as const;
+
+const manualResultRequired = [
+  'command_id',
+  'source',
+  'portion_grams',
+  'actual_grams',
+  'status',
+  'started_at',
+  'finished_at',
+  'error_code',
+  'error_message',
+] as const;
+
+const manualResultBodySchema = {
+  oneOf: [
+    {
+      type: 'object',
+      additionalProperties: false,
+      required: manualResultRequired,
+      properties: {
+        ...manualResultBaseProperties,
+        actual_grams: {
+          type: 'number',
+          minimum: 0,
+          maximum: 999_999.99,
+          multipleOf: 0.01,
+        },
+        status: { type: 'string', const: 'completed' },
+        error_code: { type: 'null' },
+        error_message: { type: 'null' },
+      },
+    },
+    {
+      type: 'object',
+      additionalProperties: false,
+      required: manualResultRequired,
+      properties: {
+        ...manualResultBaseProperties,
+        actual_grams: {
+          type: ['number', 'null'],
+          minimum: 0,
+          maximum: 999_999.99,
+          multipleOf: 0.01,
+        },
+        status: { type: 'string', const: 'failed' },
+        error_code: { type: 'string', minLength: 1, maxLength: 64, pattern: '\\S' },
+        error_message: { type: 'string', minLength: 1, maxLength: 2_000, pattern: '\\S' },
+      },
+    },
+  ],
+} as const;
+
+const manualResultResponseSchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['feeding_id', 'command_id', 'status', 'actual_grams', 'finished_at'],
+  properties: {
+    feeding_id: { type: 'string', format: 'uuid' },
+    command_id: { type: 'string', format: 'uuid' },
+    status: { type: 'string', enum: ['completed', 'failed'] },
+    actual_grams: { type: ['number', 'null'] },
+    finished_at: { type: 'string', format: 'date-time' },
+  },
+} as const;
+
 export function createCommandRoutes(commandService: CommandService): FastifyPluginAsync {
   return async (fastify): Promise<void> => {
     fastify.get<{ Params: DeviceParams; Querystring: PendingCommandQuery }>(
@@ -186,6 +278,22 @@ export function createCommandRoutes(commandService: CommandService): FastifyPlug
       async (request) => commandService.acknowledge(
         request.params.device_id,
         request.params.command_id,
+        request.body,
+      ),
+    );
+
+    fastify.post<{ Params: FeedingParams; Body: ManualFeedingResultInput }>(
+      '/api/v1/devices/:device_id/feedings/:feeding_id/result',
+      {
+        schema: {
+          params: feedingParamsSchema,
+          body: manualResultBodySchema,
+          response: { 200: manualResultResponseSchema },
+        },
+      },
+      async (request) => commandService.submitResult(
+        request.params.device_id,
+        request.params.feeding_id,
         request.body,
       ),
     );

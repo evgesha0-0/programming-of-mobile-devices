@@ -3,7 +3,12 @@ import test from 'node:test';
 
 import { buildApp } from '../src/app.js';
 import type { CommandRepository } from '../src/commands/command.repository.js';
-import type { ManualCommandRecord, ManualCommandValues } from '../src/commands/command.types.js';
+import type {
+  ManualCommandRecord,
+  ManualCommandValues,
+  ManualFeedingResultRecord,
+  ManualFeedingResultValues,
+} from '../src/commands/command.types.js';
 import type { DeviceRepository } from '../src/devices/device.repository.js';
 import type { ScheduleRepository } from '../src/schedules/schedule.repository.js';
 
@@ -26,6 +31,10 @@ const unusedScheduleRepository: ScheduleRepository = {
 
 function memoryRepository(): CommandRepository {
   const commands = new Map<string, ManualCommandRecord>();
+  const results = new Map<string, {
+    values: ManualFeedingResultValues;
+    result: ManualFeedingResultRecord;
+  }>();
   const serverTime = new Date('2026-11-03T06:00:00Z');
 
   return {
@@ -129,6 +138,43 @@ function memoryRepository(): CommandRepository {
           startedAt: values.startedAt,
         },
       };
+    },
+    async submitResult(values) {
+      if (values.deviceId !== deviceId) return { kind: 'not_found' };
+      const command = [...commands.values()].find(
+        (candidate) => candidate.feedingId === values.feedingId,
+      );
+      if (!command) return { kind: 'not_found' };
+      const identityMatches = command.commandId === values.commandId
+        && Number(command.portionGrams) === values.portionGrams
+        && command.startedAt?.getTime() === values.startedAt.getTime();
+      if (!identityMatches) return { kind: 'conflict' };
+      if (values.finishedAt < values.startedAt) return { kind: 'invalid_timeline' };
+
+      const existing = results.get(values.feedingId);
+      if (existing) {
+        return sameResult(existing.values, values)
+          ? { kind: 'accepted', result: existing.result }
+          : { kind: 'conflict' };
+      }
+      if (command.status !== 'running') return { kind: 'conflict' };
+
+      const result: ManualFeedingResultRecord = {
+        feedingId: values.feedingId,
+        commandId: values.commandId,
+        status: values.status,
+        actualGrams: values.actualGrams === null ? null : values.actualGrams.toFixed(2),
+        finishedAt: values.finishedAt,
+      };
+      results.set(values.feedingId, { values, result });
+      commands.set(command.commandId, {
+        ...command,
+        status: values.status,
+        actualGrams: result.actualGrams,
+        finishedAt: values.finishedAt,
+        errorCode: values.errorCode,
+      });
+      return { kind: 'accepted', result };
     },
   };
 }
@@ -425,6 +471,204 @@ test('command acknowledgment validates request and returns not found', async (t)
   assert.equal(missing.statusCode, 404);
   assert.equal(missing.json().error.code, 'NOT_FOUND');
 });
+
+test('completed manual result is saved and an exact repeat is idempotent', async (t) => {
+  const app = await appWith();
+  t.after(() => app.close());
+  const created = await app.inject({
+    method: 'POST',
+    url: `/api/v1/devices/${deviceId}/feeding-commands`,
+    payload: validCommand,
+  });
+  const startedAt = '2090-01-01T00:00:00Z';
+  await app.inject({
+    method: 'POST',
+    url: `/api/v1/devices/${deviceId}/commands/${commandId}/ack`,
+    payload: {
+      feeding_id: created.json().feeding_id,
+      status: 'running',
+      started_at: startedAt,
+    },
+  });
+  const result = {
+    command_id: commandId,
+    source: 'manual',
+    portion_grams: 40,
+    actual_grams: 39.5,
+    status: 'completed',
+    started_at: startedAt,
+    finished_at: '2090-01-01T00:00:12Z',
+    error_code: null,
+    error_message: null,
+  };
+
+  const accepted = await app.inject({
+    method: 'POST',
+    url: `/api/v1/devices/${deviceId}/feedings/${created.json().feeding_id}/result`,
+    payload: result,
+  });
+  assert.equal(accepted.statusCode, 200);
+  assert.deepEqual(accepted.json(), {
+    feeding_id: created.json().feeding_id,
+    command_id: commandId,
+    status: 'completed',
+    actual_grams: 39.5,
+    finished_at: '2090-01-01T00:00:12.000Z',
+  });
+
+  const repeated = await app.inject({
+    method: 'POST',
+    url: `/api/v1/devices/${deviceId}/feedings/${created.json().feeding_id}/result`,
+    payload: result,
+  });
+  assert.equal(repeated.statusCode, 200);
+  assert.deepEqual(repeated.json(), accepted.json());
+
+  const conflict = await app.inject({
+    method: 'POST',
+    url: `/api/v1/devices/${deviceId}/feedings/${created.json().feeding_id}/result`,
+    payload: { ...result, actual_grams: 38 },
+  });
+  assert.equal(conflict.statusCode, 409);
+  assert.equal(conflict.json().error.code, 'CONFLICT');
+});
+
+test('failed manual result accepts nullable weight and required error details', async (t) => {
+  const app = await appWith();
+  t.after(() => app.close());
+  const failedCommandId = '693df286-f089-463e-848d-5a19f7027449';
+  const created = await app.inject({
+    method: 'POST',
+    url: `/api/v1/devices/${deviceId}/feeding-commands`,
+    payload: { ...validCommand, command_id: failedCommandId, portion_grams: 25 },
+  });
+  const startedAt = '2090-02-01T00:00:00Z';
+  await app.inject({
+    method: 'POST',
+    url: `/api/v1/devices/${deviceId}/commands/${failedCommandId}/ack`,
+    payload: {
+      feeding_id: created.json().feeding_id,
+      status: 'running',
+      started_at: startedAt,
+    },
+  });
+
+  const response = await app.inject({
+    method: 'POST',
+    url: `/api/v1/devices/${deviceId}/feedings/${created.json().feeding_id}/result`,
+    payload: {
+      command_id: failedCommandId,
+      source: 'manual',
+      portion_grams: 25,
+      actual_grams: null,
+      status: 'failed',
+      started_at: startedAt,
+      finished_at: '2090-02-01T00:00:05Z',
+      error_code: 'MOTOR_ERROR',
+      error_message: 'Motor is blocked',
+    },
+  });
+
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(response.json(), {
+    feeding_id: created.json().feeding_id,
+    command_id: failedCommandId,
+    status: 'failed',
+    actual_grams: null,
+    finished_at: '2090-02-01T00:00:05.000Z',
+  });
+});
+
+test('manual result validates payload, timeline and current command state', async (t) => {
+  const app = await appWith();
+  t.after(() => app.close());
+  const created = await app.inject({
+    method: 'POST',
+    url: `/api/v1/devices/${deviceId}/feeding-commands`,
+    payload: validCommand,
+  });
+  const base = {
+    command_id: commandId,
+    source: 'manual',
+    portion_grams: 40,
+    actual_grams: 39.5,
+    status: 'completed',
+    started_at: '2090-01-01T00:00:00Z',
+    finished_at: '2090-01-01T00:00:12Z',
+    error_code: null,
+    error_message: null,
+  };
+
+  for (const payload of [
+    { ...base, source: 'scheduled' },
+    { ...base, actual_grams: null },
+    { ...base, error_code: 'UNEXPECTED' },
+    { ...base, portion_grams: 10.001 },
+    { ...base, extra: true },
+    {
+      ...base,
+      status: 'failed',
+      actual_grams: null,
+      error_code: '   ',
+      error_message: 'Motor is blocked',
+    },
+  ]) {
+    const response = await app.inject({
+      method: 'POST',
+      url: `/api/v1/devices/${deviceId}/feedings/${created.json().feeding_id}/result`,
+      payload,
+    });
+    assert.equal(response.statusCode, 400, JSON.stringify(payload));
+    assert.equal(response.json().error.code, 'VALIDATION_ERROR');
+  }
+
+  const pendingConflict = await app.inject({
+    method: 'POST',
+    url: `/api/v1/devices/${deviceId}/feedings/${created.json().feeding_id}/result`,
+    payload: base,
+  });
+  assert.equal(pendingConflict.statusCode, 409);
+  assert.equal(pendingConflict.json().error.code, 'CONFLICT');
+
+  await app.inject({
+    method: 'POST',
+    url: `/api/v1/devices/${deviceId}/commands/${commandId}/ack`,
+    payload: {
+      feeding_id: created.json().feeding_id,
+      status: 'running',
+      started_at: base.started_at,
+    },
+  });
+  const invalidTimeline = await app.inject({
+    method: 'POST',
+    url: `/api/v1/devices/${deviceId}/feedings/${created.json().feeding_id}/result`,
+    payload: { ...base, finished_at: '2089-12-31T23:59:59Z' },
+  });
+  assert.equal(invalidTimeline.statusCode, 400);
+  assert.equal(invalidTimeline.json().error.code, 'VALIDATION_ERROR');
+
+  const missing = await app.inject({
+    method: 'POST',
+    url: `/api/v1/devices/${deviceId}/feedings/ebc2fd74-7272-4c9e-a416-bdffde906913/result`,
+    payload: base,
+  });
+  assert.equal(missing.statusCode, 404);
+  assert.equal(missing.json().error.code, 'NOT_FOUND');
+});
+
+function sameResult(left: ManualFeedingResultValues, right: ManualFeedingResultValues): boolean {
+  return left.deviceId === right.deviceId
+    && left.feedingId === right.feedingId
+    && left.commandId === right.commandId
+    && left.source === right.source
+    && left.portionGrams === right.portionGrams
+    && left.actualGrams === right.actualGrams
+    && left.status === right.status
+    && left.startedAt.getTime() === right.startedAt.getTime()
+    && left.finishedAt.getTime() === right.finishedAt.getTime()
+    && left.errorCode === right.errorCode
+    && left.errorMessage === right.errorMessage;
+}
 
 function sameCommand(command: ManualCommandRecord, values: ManualCommandValues): boolean {
   return command.deviceId === values.deviceId

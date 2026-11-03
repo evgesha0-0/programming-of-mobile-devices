@@ -10,7 +10,10 @@ import type {
   ListPendingCommandsResult,
   ManualCommandRecord,
   ManualCommandValues,
+  ManualFeedingResultRecord,
+  ManualFeedingResultValues,
   PendingCommandRecord,
+  SubmitManualFeedingResult,
 } from './command.types.js';
 
 interface CommandTransactionClient extends QueryExecutor {
@@ -25,6 +28,7 @@ export interface CommandRepository {
   create(values: ManualCommandValues): Promise<CreateManualCommandResult>;
   listPending(deviceId: string, limit: number): Promise<ListPendingCommandsResult>;
   acknowledge(values: AcknowledgeCommandValues): Promise<AcknowledgeCommandResult>;
+  submitResult(values: ManualFeedingResultValues): Promise<SubmitManualFeedingResult>;
 }
 
 interface InsertedCommandRow extends QueryResultRow {
@@ -65,6 +69,23 @@ interface AcknowledgeCommandRow extends QueryResultRow {
   feeding_status: FeedingStatus;
   feeding_started_at: Date | string | null;
   server_time: Date | string;
+}
+
+interface ManualResultRow extends QueryResultRow {
+  command_id: string;
+  command_status: FeedingStatus;
+  command_portion_grams: string | number;
+  command_started_at: Date | string | null;
+  command_finished_at: Date | string | null;
+  command_error_code: string | null;
+  feeding_source: 'manual' | 'scheduled';
+  feeding_status: FeedingStatus;
+  feeding_portion_grams: string | number;
+  feeding_started_at: Date | string | null;
+  feeding_finished_at: Date | string | null;
+  actual_grams: string | number | null;
+  feeding_error_code: string | null;
+  feeding_error_message: string | null;
 }
 
 export function createCommandRepository(database: CommandDatabase): CommandRepository {
@@ -330,6 +351,120 @@ export function createCommandRepository(database: CommandDatabase): CommandRepos
         client.release();
       }
     },
+
+    async submitResult(values) {
+      const client = await database.connect();
+      try {
+        await client.query('BEGIN');
+        const result = await client.query<ManualResultRow>(
+          `SELECT
+             command.command_id,
+             command.status AS command_status,
+             command.portion_grams AS command_portion_grams,
+             command.started_at AS command_started_at,
+             command.finished_at AS command_finished_at,
+             command.error_code AS command_error_code,
+             feeding.source AS feeding_source,
+             feeding.status AS feeding_status,
+             feeding.portion_grams AS feeding_portion_grams,
+             feeding.started_at AS feeding_started_at,
+             feeding.finished_at AS feeding_finished_at,
+             feeding.actual_grams,
+             feeding.error_code AS feeding_error_code,
+             feeding.error_message AS feeding_error_message
+           FROM feedings AS feeding
+           JOIN feeding_commands AS command
+             ON command.device_id = feeding.device_id
+            AND command.command_id = feeding.command_id
+            AND command.feeding_id = feeding.feeding_id
+           WHERE feeding.device_id = $1 AND feeding.feeding_id = $2
+           FOR UPDATE OF command, feeding`,
+          [values.deviceId, values.feedingId],
+        );
+        const row = result.rows[0];
+        if (!row) {
+          await client.query('COMMIT');
+          return { kind: 'not_found' };
+        }
+
+        const identityMatches = row.command_id === values.commandId
+          && row.feeding_source === values.source
+          && Number(row.command_portion_grams) === values.portionGrams
+          && Number(row.feeding_portion_grams) === values.portionGrams
+          && sameNullableDate(row.command_started_at, values.startedAt)
+          && sameNullableDate(row.feeding_started_at, values.startedAt);
+        if (!identityMatches) {
+          await client.query('COMMIT');
+          return { kind: 'conflict' };
+        }
+
+        if (values.finishedAt < values.startedAt) {
+          await client.query('COMMIT');
+          return { kind: 'invalid_timeline' };
+        }
+
+        if (row.command_status === 'completed' || row.command_status === 'failed') {
+          const exactRepeat = isExactManualResult(row, values);
+          await client.query('COMMIT');
+          return exactRepeat
+            ? { kind: 'accepted', result: manualResultRecord(values) }
+            : { kind: 'conflict' };
+        }
+
+        if (row.command_status !== 'running' || row.feeding_status !== 'running') {
+          await client.query('COMMIT');
+          return { kind: 'conflict' };
+        }
+
+        const updatedCommand = await client.query(
+          `UPDATE feeding_commands
+           SET status = $3, finished_at = $4, error_code = $5
+           WHERE device_id = $1 AND command_id = $2 AND status = 'running'
+           RETURNING command_id`,
+          [
+            values.deviceId,
+            values.commandId,
+            values.status,
+            values.finishedAt,
+            values.errorCode,
+          ],
+        );
+        const updatedFeeding = await client.query(
+          `UPDATE feedings
+           SET status = $3,
+               actual_grams = $4,
+               finished_at = $5,
+               error_code = $6,
+               error_message = $7
+           WHERE device_id = $1 AND feeding_id = $2 AND status = 'running'
+           RETURNING feeding_id`,
+          [
+            values.deviceId,
+            values.feedingId,
+            values.status,
+            values.actualGrams,
+            values.finishedAt,
+            values.errorCode,
+            values.errorMessage,
+          ],
+        );
+        if (updatedCommand.rows.length !== 1 || updatedFeeding.rows.length !== 1) {
+          throw new Error('Database did not save the manual feeding result consistently');
+        }
+
+        await client.query('COMMIT');
+        return { kind: 'accepted', result: manualResultRecord(values) };
+      } catch (error) {
+        try {
+          await client.query('ROLLBACK');
+        } catch {
+          // Preserve the original database error.
+        }
+        throw error;
+      } finally {
+        client.release();
+      }
+    },
   };
 }
 
@@ -416,6 +551,35 @@ function acknowledgedRecord(values: AcknowledgeCommandValues): AcknowledgedComma
 
 function nullableDate(value: Date | string | null): Date | null {
   return value === null ? null : toDate(value);
+}
+
+function sameNullableDate(value: Date | string | null, expected: Date): boolean {
+  return nullableDate(value)?.getTime() === expected.getTime();
+}
+
+function sameNullableNumber(value: string | number | null, expected: number | null): boolean {
+  return value === null ? expected === null : expected !== null && Number(value) === expected;
+}
+
+function isExactManualResult(row: ManualResultRow, values: ManualFeedingResultValues): boolean {
+  return row.command_status === values.status
+    && row.feeding_status === values.status
+    && sameNullableDate(row.command_finished_at, values.finishedAt)
+    && sameNullableDate(row.feeding_finished_at, values.finishedAt)
+    && sameNullableNumber(row.actual_grams, values.actualGrams)
+    && row.command_error_code === values.errorCode
+    && row.feeding_error_code === values.errorCode
+    && row.feeding_error_message === values.errorMessage;
+}
+
+function manualResultRecord(values: ManualFeedingResultValues): ManualFeedingResultRecord {
+  return {
+    feedingId: values.feedingId,
+    commandId: values.commandId,
+    status: values.status,
+    actualGrams: values.actualGrams === null ? null : String(values.actualGrams),
+    finishedAt: values.finishedAt,
+  };
 }
 
 function requireCommand(command: ManualCommandRecord | null): ManualCommandRecord {

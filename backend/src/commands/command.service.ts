@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { ConflictError, NotFoundError } from '../utils/http-error.js';
 import type { CommandRepository } from './command.repository.js';
 import type { ManualCommandRecord, PendingCommandRecord } from './command.types.js';
+import type { ManualResultStatus } from './command.types.js';
 
 export interface CreateManualCommandInput {
   command_id: string;
@@ -58,6 +59,40 @@ export interface AcknowledgeCommandResponse {
   started_at: string;
 }
 
+interface ManualFeedingResultBaseInput {
+  command_id: string;
+  source: 'manual';
+  portion_grams: number;
+  started_at: string;
+  finished_at: string;
+}
+
+export interface CompletedManualFeedingResultInput extends ManualFeedingResultBaseInput {
+  actual_grams: number;
+  status: 'completed';
+  error_code: null;
+  error_message: null;
+}
+
+export interface FailedManualFeedingResultInput extends ManualFeedingResultBaseInput {
+  actual_grams: number | null;
+  status: 'failed';
+  error_code: string;
+  error_message: string;
+}
+
+export type ManualFeedingResultInput =
+  | CompletedManualFeedingResultInput
+  | FailedManualFeedingResultInput;
+
+export interface ManualFeedingResultResponse {
+  feeding_id: string;
+  command_id: string;
+  status: ManualResultStatus;
+  actual_grams: number | null;
+  finished_at: string;
+}
+
 export interface CommandService {
   create(
     deviceId: string,
@@ -69,6 +104,11 @@ export interface CommandService {
     commandId: string,
     input: AcknowledgeCommandInput,
   ): Promise<AcknowledgeCommandResponse>;
+  submitResult(
+    deviceId: string,
+    feedingId: string,
+    input: ManualFeedingResultInput,
+  ): Promise<ManualFeedingResultResponse>;
 }
 
 export function createCommandService(
@@ -129,6 +169,36 @@ export function createCommandService(
         started_at: result.command.startedAt.toISOString(),
       };
     },
+
+    async submitResult(deviceId, feedingId, input) {
+      const result = await repository.submitResult({
+        deviceId,
+        feedingId,
+        commandId: input.command_id,
+        source: input.source,
+        portionGrams: input.portion_grams,
+        actualGrams: input.actual_grams,
+        status: input.status,
+        startedAt: new Date(input.started_at),
+        finishedAt: new Date(input.finished_at),
+        errorCode: input.error_code,
+        errorMessage: input.error_message,
+      });
+      if (result.kind === 'not_found') throw new NotFoundError('Кормление не найдено');
+      if (result.kind === 'conflict') {
+        throw new ConflictError('Результат конфликтует с текущим состоянием кормления');
+      }
+      if (result.kind === 'invalid_timeline') throw new InvalidResultTimelineError();
+      return {
+        feeding_id: result.result.feedingId,
+        command_id: result.result.commandId,
+        status: result.result.status,
+        actual_grams: result.result.actualGrams === null
+          ? null
+          : Number(result.result.actualGrams),
+        finished_at: result.result.finishedAt.toISOString(),
+      };
+    },
   };
 }
 
@@ -174,6 +244,14 @@ class InvalidStartedAtError extends Error {
 
   constructor() {
     super('Поле started_at не может быть раньше времени создания команды');
+  }
+}
+
+class InvalidResultTimelineError extends Error {
+  readonly validation = [{ instancePath: '/finished_at', message: 'must not precede started_at' }];
+
+  constructor() {
+    super('Поле finished_at не может быть раньше started_at');
   }
 }
 

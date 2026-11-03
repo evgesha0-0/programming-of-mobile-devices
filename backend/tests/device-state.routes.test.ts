@@ -16,6 +16,7 @@ const unusedCommandRepository: CommandRepository = {
   async create() { throw new Error('Command repository must not be used by device routes'); },
   async listPending() { throw new Error('Command repository must not be used by device routes'); },
   async acknowledge() { throw new Error('Command repository must not be used by device routes'); },
+  async submitResult() { throw new Error('Command repository must not be used by device routes'); },
 };
 const unusedScheduleRepository: ScheduleRepository = {
   async list() { throw new Error('Schedule repository must not be used by device routes'); },

@@ -506,4 +506,121 @@ test('manual command repository creates command and feeding atomically with idem
     ...acknowledgment,
     commandId: randomUUID(),
   })).kind, 'not_found');
+
+  const completedResult = {
+    deviceId: ackDeviceId,
+    feedingId: ackFeedingId,
+    commandId: ackCommandId,
+    source: 'manual' as const,
+    portionGrams: 40,
+    actualGrams: 39.5,
+    status: 'completed' as const,
+    startedAt: acknowledgment.startedAt,
+    finishedAt: new Date('2090-01-01T00:00:20Z'),
+    errorCode: null,
+    errorMessage: null,
+  };
+  const completed = await repository.submitResult(completedResult);
+  assert.equal(completed.kind, 'accepted');
+  assert.deepEqual(await repository.submitResult(completedResult), completed);
+  assert.equal((await repository.submitResult({
+    ...completedResult,
+    actualGrams: 38,
+  })).kind, 'conflict');
+  assert.equal((await repository.submitResult({
+    ...completedResult,
+    finishedAt: new Date('2089-12-31T23:59:59Z'),
+  })).kind, 'invalid_timeline');
+
+  const completedRows = await db.query<{
+    command_status: string;
+    feeding_status: string;
+    actual_grams: string | number | null;
+    command_finished: Date | null;
+    feeding_finished: Date | null;
+  }>(
+    `SELECT
+       c.status AS command_status,
+       f.status AS feeding_status,
+       f.actual_grams,
+       c.finished_at AS command_finished,
+       f.finished_at AS feeding_finished
+     FROM feeding_commands c
+     JOIN feedings f ON f.feeding_id = c.feeding_id
+     WHERE c.command_id = $1`,
+    [ackCommandId],
+  );
+  assert.equal(completedRows.rows[0]?.command_status, 'completed');
+  assert.equal(completedRows.rows[0]?.feeding_status, 'completed');
+  assert.equal(Number(completedRows.rows[0]?.actual_grams), 39.5);
+  assert.deepEqual(completedRows.rows[0]?.command_finished, completedResult.finishedAt);
+  assert.deepEqual(completedRows.rows[0]?.feeding_finished, completedResult.finishedAt);
+
+  const failedCommandId = randomUUID();
+  const failedFeedingId = randomUUID();
+  const failedStartedAt = new Date('2090-03-01T00:00:10Z');
+  await repository.create({
+    commandId: failedCommandId,
+    feedingId: failedFeedingId,
+    deviceId: ackDeviceId,
+    portionGrams: 25,
+    createdAt: new Date('2090-03-01T00:00:00Z'),
+    expiresAt: new Date('2099-03-01T00:05:00Z'),
+  });
+  await repository.acknowledge({
+    commandId: failedCommandId,
+    feedingId: failedFeedingId,
+    deviceId: ackDeviceId,
+    startedAt: failedStartedAt,
+  });
+  const failed = await repository.submitResult({
+    deviceId: ackDeviceId,
+    feedingId: failedFeedingId,
+    commandId: failedCommandId,
+    source: 'manual',
+    portionGrams: 25,
+    actualGrams: null,
+    status: 'failed',
+    startedAt: failedStartedAt,
+    finishedAt: new Date('2090-03-01T00:00:15Z'),
+    errorCode: 'MOTOR_ERROR',
+    errorMessage: 'Motor is blocked',
+  });
+  assert.equal(failed.kind, 'accepted');
+  const failedRows = await db.query<{
+    command_status: string;
+    feeding_status: string;
+    command_error_code: string | null;
+    feeding_error_code: string | null;
+    error_message: string | null;
+  }>(
+    `SELECT
+       c.status AS command_status,
+       f.status AS feeding_status,
+       c.error_code AS command_error_code,
+       f.error_code AS feeding_error_code,
+       f.error_message
+     FROM feeding_commands c
+     JOIN feedings f ON f.feeding_id = c.feeding_id
+     WHERE c.command_id = $1`,
+    [failedCommandId],
+  );
+  assert.equal(failedRows.rows[0]?.command_status, 'failed');
+  assert.equal(failedRows.rows[0]?.feeding_status, 'failed');
+  assert.equal(failedRows.rows[0]?.command_error_code, 'MOTOR_ERROR');
+  assert.equal(failedRows.rows[0]?.feeding_error_code, 'MOTOR_ERROR');
+  assert.equal(failedRows.rows[0]?.error_message, 'Motor is blocked');
+
+  assert.equal((await repository.submitResult({
+    ...completedResult,
+    feedingId: randomUUID(),
+  })).kind, 'not_found');
+  assert.equal((await repository.submitResult({
+    ...completedResult,
+    feedingId: invalidStartedFeedingId,
+    commandId: invalidStartedCommandId,
+    portionGrams: 25,
+    startedAt: new Date('2090-02-01T00:00:00Z'),
+    finishedAt: new Date('2090-02-01T00:00:10Z'),
+  })).kind, 'conflict');
 });
