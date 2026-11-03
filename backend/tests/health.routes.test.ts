@@ -4,6 +4,7 @@ import test from 'node:test';
 import { buildApp } from '../src/app.js';
 import type { CommandRepository } from '../src/commands/command.repository.js';
 import type { DeviceRepository } from '../src/devices/device.repository.js';
+import type { FeedingRepository } from '../src/feedings/feeding.repository.js';
 import type { ScheduleRepository } from '../src/schedules/schedule.repository.js';
 
 const unusedDeviceRepository: DeviceRepository = {
@@ -30,11 +31,16 @@ const unusedScheduleRepository: ScheduleRepository = {
   async delete() { throw new Error('Schedule repository must not be used by health routes'); },
 };
 
+const unusedFeedingRepository: FeedingRepository = {
+  async createScheduledEvent() { throw new Error('Feeding repository must not be used by health routes'); },
+};
+
 test('Fastify application initializes without opening a network port', async (t) => {
   const app = await buildApp({
     checkDatabase: async () => undefined,
     commandRepository: unusedCommandRepository,
     deviceRepository: unusedDeviceRepository,
+    feedingRepository: unusedFeedingRepository,
     scheduleRepository: unusedScheduleRepository,
   });
   t.after(() => app.close());
@@ -52,6 +58,7 @@ test('GET /health reports that HTTP server is alive without checking PostgreSQL'
     },
     commandRepository: unusedCommandRepository,
     deviceRepository: unusedDeviceRepository,
+    feedingRepository: unusedFeedingRepository,
     scheduleRepository: unusedScheduleRepository,
   });
   t.after(() => app.close());
@@ -71,6 +78,7 @@ test('GET /ready reports connected PostgreSQL', async (t) => {
     checkDatabase: async () => undefined,
     commandRepository: unusedCommandRepository,
     deviceRepository: unusedDeviceRepository,
+    feedingRepository: unusedFeedingRepository,
     scheduleRepository: unusedScheduleRepository,
   });
   t.after(() => app.close());
@@ -91,6 +99,7 @@ test('GET /ready returns 503 without exposing PostgreSQL error', async (t) => {
     },
     commandRepository: unusedCommandRepository,
     deviceRepository: unusedDeviceRepository,
+    feedingRepository: unusedFeedingRepository,
     scheduleRepository: unusedScheduleRepository,
   });
   t.after(() => app.close());

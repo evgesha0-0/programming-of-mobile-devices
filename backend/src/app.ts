@@ -10,8 +10,11 @@ import { createDeviceService } from './devices/device.service.js';
 import type { DeviceRepository } from './devices/device.repository.js';
 import { createDeviceStateRoutes } from './routes/device-state.routes.js';
 import { createCommandRoutes } from './routes/command.routes.js';
+import { createFeedingRoutes } from './routes/feeding.routes.js';
 import { createHealthRoutes } from './routes/health.routes.js';
 import { createScheduleRoutes } from './routes/schedule.routes.js';
+import type { FeedingRepository } from './feedings/feeding.repository.js';
+import { createFeedingService } from './feedings/feeding.service.js';
 import type { ScheduleRepository } from './schedules/schedule.repository.js';
 import { createScheduleService } from './schedules/schedule.service.js';
 import { errorHandler } from './utils/error-handler.js';
@@ -20,6 +23,7 @@ export interface BuildAppOptions {
   checkDatabase: DatabaseCheck;
   commandRepository: CommandRepository;
   deviceRepository: DeviceRepository;
+  feedingRepository: FeedingRepository;
   scheduleRepository: ScheduleRepository;
   logger?: FastifyServerOptions['logger'];
 }
@@ -39,6 +43,7 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
   await app.register(createCommandRoutes(createCommandService(options.commandRepository)));
   await app.register(createDeviceStateRoutes(createDeviceService(options.deviceRepository)));
   await app.register(createScheduleRoutes(createScheduleService(options.scheduleRepository)));
+  await app.register(createFeedingRoutes(createFeedingService(options.feedingRepository)));
 
   return app;
 }

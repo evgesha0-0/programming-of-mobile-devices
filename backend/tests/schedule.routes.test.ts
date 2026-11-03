@@ -4,6 +4,7 @@ import test from 'node:test';
 import { buildApp } from '../src/app.js';
 import type { CommandRepository } from '../src/commands/command.repository.js';
 import type { DeviceRepository } from '../src/devices/device.repository.js';
+import type { FeedingRepository } from '../src/feedings/feeding.repository.js';
 import type { ScheduleRepository } from '../src/schedules/schedule.repository.js';
 import type { ScheduleRecord, ScheduleValues } from '../src/schedules/schedule.types.js';
 
@@ -21,6 +22,9 @@ const unusedCommandRepository: CommandRepository = {
 const unusedDeviceRepository: DeviceRepository = {
   async findState() { throw new Error('Device repository must not be used by schedule routes'); },
   async updateStateIfNewer() { throw new Error('Device repository must not be used by schedule routes'); },
+};
+const unusedFeedingRepository: FeedingRepository = {
+  async createScheduledEvent() { throw new Error('Feeding repository must not be used by schedule routes'); },
 };
 
 function memoryRepository(): ScheduleRepository {
@@ -84,6 +88,7 @@ async function appWith(repository = memoryRepository()) {
     checkDatabase: async () => undefined,
     commandRepository: unusedCommandRepository,
     deviceRepository: unusedDeviceRepository,
+    feedingRepository: unusedFeedingRepository,
     scheduleRepository: repository,
   });
 }

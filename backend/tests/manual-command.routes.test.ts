@@ -10,6 +10,7 @@ import type {
   ManualFeedingResultValues,
 } from '../src/commands/command.types.js';
 import type { DeviceRepository } from '../src/devices/device.repository.js';
+import type { FeedingRepository } from '../src/feedings/feeding.repository.js';
 import type { ScheduleRepository } from '../src/schedules/schedule.repository.js';
 
 const deviceId = 'd6d174f4-e79f-49d1-9476-78bc99483752';
@@ -27,6 +28,9 @@ const unusedScheduleRepository: ScheduleRepository = {
   async create() { throw new Error('Schedule repository must not be used by command routes'); },
   async update() { throw new Error('Schedule repository must not be used by command routes'); },
   async delete() { throw new Error('Schedule repository must not be used by command routes'); },
+};
+const unusedFeedingRepository: FeedingRepository = {
+  async createScheduledEvent() { throw new Error('Feeding repository must not be used by command routes'); },
 };
 
 function memoryRepository(): CommandRepository {
@@ -184,6 +188,7 @@ async function appWith(commandRepository = memoryRepository()) {
     checkDatabase: async () => undefined,
     commandRepository,
     deviceRepository: unusedDeviceRepository,
+    feedingRepository: unusedFeedingRepository,
     scheduleRepository: unusedScheduleRepository,
   });
 }

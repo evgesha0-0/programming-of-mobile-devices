@@ -7,6 +7,7 @@ import {
   createDatabasePool,
 } from './db/connection.js';
 import { createDeviceRepository } from './devices/device.repository.js';
+import { createFeedingRepository } from './feedings/feeding.repository.js';
 import { createScheduleRepository } from './schedules/schedule.repository.js';
 
 async function start(): Promise<void> {
@@ -16,6 +17,7 @@ async function start(): Promise<void> {
     checkDatabase: () => checkDatabaseConnection(pool),
     commandRepository: createCommandRepository(pool),
     deviceRepository: createDeviceRepository(pool),
+    feedingRepository: createFeedingRepository(pool),
     scheduleRepository: createScheduleRepository(pool),
     logger: { level: env.logLevel },
   });

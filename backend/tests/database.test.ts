@@ -10,6 +10,7 @@ import { PGlite } from '@electric-sql/pglite';
 import { createCommandRepository, type CommandDatabase } from '../src/commands/command.repository.js';
 import { loadMigrations, runMigrations, type Migration, type MigrationConnection } from '../src/db/migrations.js';
 import { createDeviceRepository, type QueryExecutor } from '../src/devices/device.repository.js';
+import { createFeedingRepository, type FeedingDatabase } from '../src/feedings/feeding.repository.js';
 import { createScheduleRepository, type TransactionClient, type TransactionPool } from '../src/schedules/schedule.repository.js';
 
 function client(db: PGlite): MigrationConnection {
@@ -22,7 +23,7 @@ function client(db: PGlite): MigrationConnection {
   };
 }
 
-function transactionalDatabase(db: PGlite): TransactionPool & CommandDatabase {
+function transactionalDatabase(db: PGlite): TransactionPool & CommandDatabase & FeedingDatabase {
   const connection: TransactionClient = {
     async query<R>(sql: string, values?: readonly unknown[]) {
       if (/^(BEGIN|COMMIT|ROLLBACK)$/.test(sql)) {
@@ -623,4 +624,69 @@ test('manual command repository creates command and feeding atomically with idem
     startedAt: new Date('2090-02-01T00:00:00Z'),
     finishedAt: new Date('2090-02-01T00:00:10Z'),
   })).kind, 'conflict');
+});
+
+test('scheduled feeding repository accepts offline events idempotently', async (t) => {
+  const db = new PGlite(); t.after(() => db.close()); await runMigrations(client(db));
+  const deviceId = await device(db);
+  const scheduleId = await schedule(db, deviceId);
+  await db.query('UPDATE schedules SET deleted_at = now() WHERE schedule_id = $1', [scheduleId]);
+  const repository = createFeedingRepository(transactionalDatabase(db));
+  const values = {
+    feedingId: randomUUID(),
+    deviceId,
+    scheduleId,
+    source: 'scheduled' as const,
+    portionGrams: 40,
+    actualGrams: 39.5,
+    status: 'completed' as const,
+    createdAt: new Date('2026-11-03T05:59:00Z'),
+    startedAt: new Date('2026-11-03T06:00:00Z'),
+    finishedAt: new Date('2026-11-03T06:00:10Z'),
+    errorCode: null,
+    errorMessage: null,
+  };
+
+  const created = await repository.createScheduledEvent(values);
+  assert.equal(created.kind, 'created');
+  assert.equal(created.kind === 'created' && created.event.scheduleId, scheduleId);
+  assert.equal((await db.query('SELECT * FROM feedings WHERE feeding_id = $1', [values.feedingId])).rows.length, 1);
+
+  const repeated = await repository.createScheduledEvent(values);
+  assert.equal(repeated.kind, 'repeated');
+  assert.deepEqual(
+    repeated.kind === 'repeated' && repeated.event.receivedAt,
+    created.kind === 'created' && created.event.receivedAt,
+  );
+  assert.equal((await repository.createScheduledEvent({
+    ...values,
+    actualGrams: 38,
+  })).kind, 'conflict');
+
+  const failed = await repository.createScheduledEvent({
+    ...values,
+    feedingId: randomUUID(),
+    actualGrams: null,
+    status: 'failed',
+    errorCode: 'MOTOR_ERROR',
+    errorMessage: 'Motor is blocked',
+  });
+  assert.equal(failed.kind, 'created');
+  assert.equal(failed.kind === 'created' && failed.event.actualGrams, null);
+
+  assert.equal((await repository.createScheduledEvent({
+    ...values,
+    feedingId: randomUUID(),
+    finishedAt: new Date('2026-11-03T05:59:59Z'),
+  })).kind, 'invalid_timeline');
+  assert.equal((await repository.createScheduledEvent({
+    ...values,
+    feedingId: randomUUID(),
+    scheduleId: randomUUID(),
+  })).kind, 'not_found');
+  assert.equal((await repository.createScheduledEvent({
+    ...values,
+    feedingId: randomUUID(),
+    deviceId: randomUUID(),
+  })).kind, 'not_found');
 });

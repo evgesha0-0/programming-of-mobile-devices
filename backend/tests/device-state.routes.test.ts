@@ -10,6 +10,7 @@ import type {
   UpdatedDeviceStateRecord,
 } from '../src/devices/device.types.js';
 import type { ScheduleRepository } from '../src/schedules/schedule.repository.js';
+import type { FeedingRepository } from '../src/feedings/feeding.repository.js';
 
 const deviceId = 'd6d174f4-e79f-49d1-9476-78bc99483752';
 const unusedCommandRepository: CommandRepository = {
@@ -24,6 +25,9 @@ const unusedScheduleRepository: ScheduleRepository = {
   async create() { throw new Error('Schedule repository must not be used by device routes'); },
   async update() { throw new Error('Schedule repository must not be used by device routes'); },
   async delete() { throw new Error('Schedule repository must not be used by device routes'); },
+};
+const unusedFeedingRepository: FeedingRepository = {
+  async createScheduledEvent() { throw new Error('Feeding repository must not be used by device routes'); },
 };
 
 function initialState(): DeviceStateRecord {
@@ -64,6 +68,7 @@ async function appWith(deviceRepository: DeviceRepository) {
     checkDatabase: async () => undefined,
     commandRepository: unusedCommandRepository,
     deviceRepository,
+    feedingRepository: unusedFeedingRepository,
     scheduleRepository: unusedScheduleRepository,
   });
 }
