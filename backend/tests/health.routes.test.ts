@@ -17,6 +17,7 @@ const unusedDeviceRepository: DeviceRepository = {
 
 const unusedCommandRepository: CommandRepository = {
   async create() { throw new Error('Command repository must not be used by health routes'); },
+  async listPending() { throw new Error('Command repository must not be used by health routes'); },
 };
 
 const unusedScheduleRepository: ScheduleRepository = {

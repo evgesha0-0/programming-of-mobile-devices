@@ -325,4 +325,87 @@ test('manual command repository creates command and feeding atomically with idem
     feedingId: randomUUID(),
     deviceId: randomUUID(),
   })).kind, 'device_not_found');
+
+  const queueDeviceId = await device(db);
+  const expiredCommandId = randomUUID();
+  const expiredFeedingId = randomUUID();
+  const firstPendingCommandId = randomUUID();
+  const secondPendingCommandId = randomUUID();
+  const otherDeviceCommandId = randomUUID();
+
+  await repository.create({
+    commandId: expiredCommandId,
+    feedingId: expiredFeedingId,
+    deviceId: queueDeviceId,
+    portionGrams: 30,
+    createdAt: new Date('2000-01-01T00:00:00Z'),
+    expiresAt: new Date('2000-01-01T00:05:00Z'),
+  });
+  await repository.create({
+    commandId: firstPendingCommandId,
+    feedingId: randomUUID(),
+    deviceId: queueDeviceId,
+    portionGrams: 35,
+    createdAt: new Date('2090-01-01T00:00:00Z'),
+    expiresAt: new Date('2099-01-01T00:05:00Z'),
+  });
+  await repository.create({
+    commandId: secondPendingCommandId,
+    feedingId: randomUUID(),
+    deviceId: queueDeviceId,
+    portionGrams: 45,
+    createdAt: new Date('2090-01-01T00:00:01Z'),
+    expiresAt: new Date('2099-01-01T00:05:00Z'),
+  });
+  await repository.create({
+    commandId: otherDeviceCommandId,
+    feedingId: randomUUID(),
+    deviceId: otherDeviceId,
+    portionGrams: 20,
+    createdAt: new Date('2000-01-01T00:00:00Z'),
+    expiresAt: new Date('2000-01-01T00:05:00Z'),
+  });
+
+  const limited = await repository.listPending(queueDeviceId, 1);
+  assert.equal(limited.kind, 'found');
+  assert.ok(limited.kind === 'found' && limited.commands.serverTime instanceof Date);
+  assert.deepEqual(
+    limited.kind === 'found' && limited.commands.items.map((item) => item.commandId),
+    [firstPendingCommandId],
+  );
+
+  const expired = await db.query<{
+    command_status: string;
+    feeding_status: string;
+    command_finished: Date | null;
+    feeding_finished: Date | null;
+  }>(
+    `SELECT
+       c.status AS command_status,
+       f.status AS feeding_status,
+       c.finished_at AS command_finished,
+       f.finished_at AS feeding_finished
+     FROM feeding_commands c
+     JOIN feedings f ON f.feeding_id = c.feeding_id
+     WHERE c.command_id = $1`,
+    [expiredCommandId],
+  );
+  assert.equal(expired.rows[0]?.command_status, 'expired');
+  assert.equal(expired.rows[0]?.feeding_status, 'expired');
+  assert.ok(expired.rows[0]?.command_finished);
+  assert.deepEqual(expired.rows[0]?.feeding_finished, expired.rows[0]?.command_finished);
+
+  const allPending = await repository.listPending(queueDeviceId, 10);
+  assert.deepEqual(
+    allPending.kind === 'found' && allPending.commands.items.map((item) => item.commandId),
+    [firstPendingCommandId, secondPendingCommandId],
+  );
+  assert.equal(
+    (await db.query<{ status: string }>(
+      'SELECT status FROM feeding_commands WHERE command_id = $1',
+      [otherDeviceCommandId],
+    )).rows[0]?.status,
+    'pending',
+  );
+  assert.equal((await repository.listPending(randomUUID(), 10)).kind, 'device_not_found');
 });

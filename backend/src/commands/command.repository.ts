@@ -4,8 +4,10 @@ import type { QueryExecutor } from '../devices/device.repository.js';
 import type {
   CreateManualCommandResult,
   FeedingStatus,
+  ListPendingCommandsResult,
   ManualCommandRecord,
   ManualCommandValues,
+  PendingCommandRecord,
 } from './command.types.js';
 
 interface CommandTransactionClient extends QueryExecutor {
@@ -18,6 +20,7 @@ export interface CommandDatabase extends QueryExecutor {
 
 export interface CommandRepository {
   create(values: ManualCommandValues): Promise<CreateManualCommandResult>;
+  listPending(deviceId: string, limit: number): Promise<ListPendingCommandsResult>;
 }
 
 interface InsertedCommandRow extends QueryResultRow {
@@ -36,6 +39,17 @@ interface ManualCommandRow extends QueryResultRow {
   finished_at: Date | string | null;
   actual_grams: string | number | null;
   error_code: string | null;
+}
+
+interface PendingCommandRow extends QueryResultRow {
+  server_time: Date | string;
+  command_id: string | null;
+  feeding_id: string | null;
+  device_id: string | null;
+  portion_grams: string | number | null;
+  status: 'pending' | null;
+  created_at: Date | string | null;
+  expires_at: Date | string | null;
 }
 
 export function createCommandRepository(database: CommandDatabase): CommandRepository {
@@ -118,6 +132,84 @@ export function createCommandRepository(database: CommandDatabase): CommandRepos
         client.release();
       }
     },
+
+    async listPending(deviceId, limit) {
+      const client = await database.connect();
+      try {
+        await client.query('BEGIN');
+        await client.query(
+          `WITH expired AS (
+             UPDATE feeding_commands
+             SET status = 'expired', finished_at = now()
+             WHERE device_id = $1
+               AND status = 'pending'
+               AND expires_at <= now()
+             RETURNING device_id, feeding_id
+           )
+           UPDATE feedings AS f
+           SET status = 'expired', finished_at = now()
+           FROM expired AS e
+           WHERE f.device_id = e.device_id
+             AND f.feeding_id = e.feeding_id
+             AND f.status = 'pending'`,
+          [deviceId],
+        );
+
+        const result = await client.query<PendingCommandRow>(
+          `SELECT
+             now() AS server_time,
+             command.command_id,
+             command.feeding_id,
+             command.device_id,
+             command.portion_grams,
+             command.status,
+             command.created_at,
+             command.expires_at
+           FROM devices AS device
+           LEFT JOIN LATERAL (
+             SELECT
+               command_id,
+               feeding_id,
+               device_id,
+               portion_grams,
+               status,
+               created_at,
+               expires_at
+             FROM feeding_commands
+             WHERE device_id = device.device_id
+               AND status = 'pending'
+               AND expires_at > now()
+             ORDER BY created_at, command_id
+             LIMIT $2
+           ) AS command ON true
+           WHERE device.device_id = $1
+           ORDER BY command.created_at, command.command_id`,
+          [deviceId, limit],
+        );
+
+        const first = result.rows[0];
+        if (!first) {
+          await client.query('COMMIT');
+          return { kind: 'device_not_found' };
+        }
+
+        const commands = {
+          serverTime: toDate(first.server_time),
+          items: result.rows.flatMap((row) => row.command_id === null ? [] : [mapPending(row)]),
+        };
+        await client.query('COMMIT');
+        return { kind: 'found', commands };
+      } catch (error) {
+        try {
+          await client.query('ROLLBACK');
+        } catch {
+          // Preserve the original database error.
+        }
+        throw error;
+      } finally {
+        client.release();
+      }
+    },
   };
 }
 
@@ -167,6 +259,30 @@ function isSameCommand(command: ManualCommandRecord, values: ManualCommandValues
   return command.deviceId === values.deviceId
     && Number(command.portionGrams) === values.portionGrams
     && command.expiresAt.getTime() === values.expiresAt.getTime();
+}
+
+function mapPending(row: PendingCommandRow): PendingCommandRecord {
+  if (
+    row.command_id === null
+    || row.feeding_id === null
+    || row.device_id === null
+    || row.portion_grams === null
+    || row.status !== 'pending'
+    || row.created_at === null
+    || row.expires_at === null
+  ) {
+    throw new Error('Database returned an incomplete pending command');
+  }
+
+  return {
+    commandId: row.command_id,
+    feedingId: row.feeding_id,
+    deviceId: row.device_id,
+    portionGrams: String(row.portion_grams),
+    status: row.status,
+    createdAt: toDate(row.created_at),
+    expiresAt: toDate(row.expires_at),
+  };
 }
 
 function requireCommand(command: ManualCommandRecord | null): ManualCommandRecord {

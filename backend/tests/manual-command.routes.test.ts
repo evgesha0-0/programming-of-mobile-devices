@@ -26,6 +26,7 @@ const unusedScheduleRepository: ScheduleRepository = {
 
 function memoryRepository(): CommandRepository {
   const commands = new Map<string, ManualCommandRecord>();
+  const serverTime = new Date('2026-11-03T06:00:00Z');
 
   return {
     async create(values) {
@@ -53,6 +54,37 @@ function memoryRepository(): CommandRepository {
       };
       commands.set(values.commandId, command);
       return { kind: 'created', command };
+    },
+    async listPending(id, limit) {
+      if (id !== deviceId) return { kind: 'device_not_found' };
+      for (const [id, command] of commands) {
+        if (command.status === 'pending' && command.expiresAt <= serverTime) {
+          commands.set(id, {
+            ...command,
+            status: 'expired',
+            finishedAt: serverTime,
+          });
+        }
+      }
+      return {
+        kind: 'found',
+        commands: {
+          serverTime,
+          items: [...commands.values()]
+            .filter((command) => command.status === 'pending')
+            .sort((left, right) => left.createdAt.getTime() - right.createdAt.getTime())
+            .slice(0, limit)
+            .map((command) => ({
+              commandId: command.commandId,
+              feedingId: command.feedingId,
+              deviceId: command.deviceId,
+              portionGrams: command.portionGrams,
+              status: 'pending' as const,
+              createdAt: command.createdAt,
+              expiresAt: command.expiresAt,
+            })),
+        },
+      };
     },
   };
 }
@@ -144,6 +176,90 @@ test('manual command validates input, expiry and device existence', async (t) =>
   });
   assert.equal(missing.statusCode, 404);
   assert.equal(missing.json().error.code, 'NOT_FOUND');
+});
+
+test('pending commands use the default limit and return the Linux contract', async (t) => {
+  const app = await appWith();
+  t.after(() => app.close());
+
+  const first = await app.inject({
+    method: 'POST',
+    url: `/api/v1/devices/${deviceId}/feeding-commands`,
+    payload: validCommand,
+  });
+  const second = await app.inject({
+    method: 'POST',
+    url: `/api/v1/devices/${deviceId}/feeding-commands`,
+    payload: {
+      ...validCommand,
+      command_id: '693df286-f089-463e-848d-5a19f7027449',
+      portion_grams: 25,
+    },
+  });
+
+  const response = await app.inject({
+    method: 'GET',
+    url: `/api/v1/devices/${deviceId}/commands/pending`,
+  });
+
+  assert.equal(first.statusCode, 202);
+  assert.equal(second.statusCode, 202);
+  assert.equal(response.statusCode, 200);
+  assert.equal(response.json().server_time, '2026-11-03T06:00:00.000Z');
+  assert.equal(response.json().items.length, 2);
+  assert.deepEqual(response.json().items[0], {
+    command_id: commandId,
+    feeding_id: first.json().feeding_id,
+    device_id: deviceId,
+    portion_grams: 40,
+    status: 'pending',
+    created_at: first.json().created_at,
+    expires_at: '2099-10-29T03:00:00.000Z',
+  });
+});
+
+test('pending commands enforce limit and validate query parameters', async (t) => {
+  const app = await appWith();
+  t.after(() => app.close());
+  await app.inject({
+    method: 'POST',
+    url: `/api/v1/devices/${deviceId}/feeding-commands`,
+    payload: validCommand,
+  });
+  await app.inject({
+    method: 'POST',
+    url: `/api/v1/devices/${deviceId}/feeding-commands`,
+    payload: { ...validCommand, command_id: '693df286-f089-463e-848d-5a19f7027449' },
+  });
+
+  const limited = await app.inject({
+    method: 'GET',
+    url: `/api/v1/devices/${deviceId}/commands/pending?limit=1`,
+  });
+  assert.equal(limited.statusCode, 200);
+  assert.equal(limited.json().items.length, 1);
+
+  for (const query of ['limit=0', 'limit=-1', 'limit=1.5', 'limit=unknown', 'limit=1&extra=1']) {
+    const response = await app.inject({
+      method: 'GET',
+      url: `/api/v1/devices/${deviceId}/commands/pending?${query}`,
+    });
+    assert.equal(response.statusCode, 400, query);
+    assert.equal(response.json().error.code, 'VALIDATION_ERROR');
+  }
+});
+
+test('pending commands return not found for an unknown device', async (t) => {
+  const app = await appWith();
+  t.after(() => app.close());
+
+  const response = await app.inject({
+    method: 'GET',
+    url: `/api/v1/devices/${missingDeviceId}/commands/pending?limit=10`,
+  });
+
+  assert.equal(response.statusCode, 404);
+  assert.equal(response.json().error.code, 'NOT_FOUND');
 });
 
 function sameCommand(command: ManualCommandRecord, values: ManualCommandValues): boolean {

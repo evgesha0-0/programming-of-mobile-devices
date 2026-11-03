@@ -9,6 +9,10 @@ interface DeviceParams {
   device_id: string;
 }
 
+interface PendingCommandQuery {
+  limit?: number;
+}
+
 const deviceParamsSchema = {
   type: 'object',
   additionalProperties: false,
@@ -69,8 +73,69 @@ const commandResponseSchema = {
   },
 } as const;
 
+const pendingCommandQuerySchema = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    limit: {
+      type: 'integer',
+      minimum: 1,
+      maximum: Number.MAX_SAFE_INTEGER,
+    },
+  },
+} as const;
+
+const pendingCommandResponseSchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['items', 'server_time'],
+  properties: {
+    items: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: [
+          'command_id',
+          'feeding_id',
+          'device_id',
+          'portion_grams',
+          'status',
+          'created_at',
+          'expires_at',
+        ],
+        properties: {
+          command_id: { type: 'string', format: 'uuid' },
+          feeding_id: { type: 'string', format: 'uuid' },
+          device_id: { type: 'string', format: 'uuid' },
+          portion_grams: { type: 'number' },
+          status: { type: 'string', const: 'pending' },
+          created_at: { type: 'string', format: 'date-time' },
+          expires_at: { type: 'string', format: 'date-time' },
+        },
+      },
+    },
+    server_time: { type: 'string', format: 'date-time' },
+  },
+} as const;
+
 export function createCommandRoutes(commandService: CommandService): FastifyPluginAsync {
   return async (fastify): Promise<void> => {
+    fastify.get<{ Params: DeviceParams; Querystring: PendingCommandQuery }>(
+      '/api/v1/devices/:device_id/commands/pending',
+      {
+        schema: {
+          params: deviceParamsSchema,
+          querystring: pendingCommandQuerySchema,
+          response: { 200: pendingCommandResponseSchema },
+        },
+      },
+      async (request) => commandService.listPending(
+        request.params.device_id,
+        request.query.limit ?? 10,
+      ),
+    );
+
     fastify.post<{ Params: DeviceParams; Body: CreateManualCommandInput }>(
       '/api/v1/devices/:device_id/feeding-commands',
       {

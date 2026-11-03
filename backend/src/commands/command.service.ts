@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 
 import { ConflictError, NotFoundError } from '../utils/http-error.js';
 import type { CommandRepository } from './command.repository.js';
-import type { ManualCommandRecord } from './command.types.js';
+import type { ManualCommandRecord, PendingCommandRecord } from './command.types.js';
 
 export interface CreateManualCommandInput {
   command_id: string;
@@ -30,11 +30,27 @@ export interface CreateManualCommandResponse {
   command: ManualCommandResponse;
 }
 
+export interface PendingCommandResponse {
+  command_id: string;
+  feeding_id: string;
+  device_id: string;
+  portion_grams: number;
+  status: 'pending';
+  created_at: string;
+  expires_at: string;
+}
+
+export interface PendingCommandListResponse {
+  items: PendingCommandResponse[];
+  server_time: string;
+}
+
 export interface CommandService {
   create(
     deviceId: string,
     input: CreateManualCommandInput,
   ): Promise<CreateManualCommandResponse>;
+  listPending(deviceId: string, limit: number): Promise<PendingCommandListResponse>;
 }
 
 export function createCommandService(
@@ -66,6 +82,15 @@ export function createCommandService(
         command: toResponse(result.command),
       };
     },
+
+    async listPending(deviceId, limit) {
+      const result = await repository.listPending(deviceId, limit);
+      if (result.kind === 'device_not_found') throw new NotFoundError('Устройство не найдено');
+      return {
+        items: result.commands.items.map(toPendingResponse),
+        server_time: result.commands.serverTime.toISOString(),
+      };
+    },
   };
 }
 
@@ -83,6 +108,18 @@ function toResponse(command: ManualCommandRecord): ManualCommandResponse {
     finished_at: command.finishedAt?.toISOString() ?? null,
     actual_grams: command.actualGrams === null ? null : Number(command.actualGrams),
     error_code: command.errorCode,
+  };
+}
+
+function toPendingResponse(command: PendingCommandRecord): PendingCommandResponse {
+  return {
+    command_id: command.commandId,
+    feeding_id: command.feedingId,
+    device_id: command.deviceId,
+    portion_grams: Number(command.portionGrams),
+    status: command.status,
+    created_at: command.createdAt.toISOString(),
+    expires_at: command.expiresAt.toISOString(),
   };
 }
 
