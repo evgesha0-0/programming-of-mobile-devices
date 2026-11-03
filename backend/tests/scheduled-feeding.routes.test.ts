@@ -41,6 +41,7 @@ function memoryRepository(): FeedingRepository {
   }>();
 
   return {
+    async list() { throw new Error('Feeding history must not be used by event tests'); },
     async createScheduledEvent(values) {
       if (values.deviceId !== deviceId || values.scheduleId !== scheduleId) {
         return { kind: 'not_found' };

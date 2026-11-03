@@ -33,6 +33,7 @@ const unusedScheduleRepository: ScheduleRepository = {
 
 const unusedFeedingRepository: FeedingRepository = {
   async createScheduledEvent() { throw new Error('Feeding repository must not be used by health routes'); },
+  async list() { throw new Error('Feeding repository must not be used by health routes'); },
 };
 
 test('Fastify application initializes without opening a network port', async (t) => {

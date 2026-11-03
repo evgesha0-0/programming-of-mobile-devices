@@ -1,4 +1,6 @@
 export type ScheduledFeedingStatus = 'completed' | 'failed';
+export type FeedingStatus = 'pending' | 'running' | ScheduledFeedingStatus | 'expired';
+export type FeedingSource = 'manual' | 'scheduled';
 
 export interface ScheduledFeedingEventValues {
   feedingId: string;
@@ -31,4 +33,29 @@ export type CreateScheduledFeedingEventResult =
   | { kind: 'not_found' }
   | { kind: 'conflict' }
   | { kind: 'invalid_timeline' };
+
+export interface FeedingHistoryCursor {
+  createdAt: string;
+  feedingId: string;
+}
+
+export interface FeedingHistoryItemRecord {
+  feedingId: string;
+  deviceId: string;
+  scheduleId: string | null;
+  commandId: string | null;
+  source: FeedingSource;
+  portionGrams: string;
+  actualGrams: string | null;
+  status: FeedingStatus;
+  createdAt: Date;
+  startedAt: Date | null;
+  finishedAt: Date | null;
+  errorCode: string | null;
+}
+
+export interface FeedingHistoryPageRecord {
+  items: FeedingHistoryItemRecord[];
+  nextCursor: FeedingHistoryCursor | null;
+}
 

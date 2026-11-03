@@ -9,12 +9,75 @@ interface DeviceParams {
   device_id: string;
 }
 
+interface FeedingHistoryQuery {
+  limit?: number;
+  cursor?: string;
+}
+
 const deviceParamsSchema = {
   type: 'object',
   additionalProperties: false,
   required: ['device_id'],
   properties: {
     device_id: { type: 'string', format: 'uuid' },
+  },
+} as const;
+
+const historyQuerySchema = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    limit: { type: 'integer', minimum: 1, maximum: 100 },
+    cursor: { type: 'string', minLength: 1, maxLength: 512 },
+  },
+} as const;
+
+const nullableDateTime = { type: ['string', 'null'], format: 'date-time' } as const;
+
+const historyResponseSchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['items', 'next_cursor'],
+  properties: {
+    items: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: [
+          'feeding_id',
+          'device_id',
+          'schedule_id',
+          'command_id',
+          'source',
+          'portion_grams',
+          'actual_grams',
+          'status',
+          'created_at',
+          'started_at',
+          'finished_at',
+          'error_code',
+        ],
+        properties: {
+          feeding_id: { type: 'string', format: 'uuid' },
+          device_id: { type: 'string', format: 'uuid' },
+          schedule_id: { type: ['string', 'null'], format: 'uuid' },
+          command_id: { type: ['string', 'null'], format: 'uuid' },
+          source: { type: 'string', enum: ['manual', 'scheduled'] },
+          portion_grams: { type: 'number' },
+          actual_grams: { type: ['number', 'null'] },
+          status: {
+            type: 'string',
+            enum: ['pending', 'running', 'completed', 'failed', 'expired'],
+          },
+          created_at: { type: 'string', format: 'date-time' },
+          started_at: nullableDateTime,
+          finished_at: nullableDateTime,
+          error_code: { type: ['string', 'null'] },
+        },
+      },
+    },
+    next_cursor: { type: ['string', 'null'] },
   },
 } as const;
 
@@ -111,6 +174,22 @@ const eventResponseSchema = {
 
 export function createFeedingRoutes(feedingService: FeedingService): FastifyPluginAsync {
   return async (fastify): Promise<void> => {
+    fastify.get<{ Params: DeviceParams; Querystring: FeedingHistoryQuery }>(
+      '/api/v1/devices/:device_id/feedings',
+      {
+        schema: {
+          params: deviceParamsSchema,
+          querystring: historyQuerySchema,
+          response: { 200: historyResponseSchema },
+        },
+      },
+      async (request) => feedingService.listHistory(
+        request.params.device_id,
+        request.query.limit ?? 50,
+        request.query.cursor,
+      ),
+    );
+
     fastify.post<{ Params: DeviceParams; Body: ScheduledFeedingInput }>(
       '/api/v1/devices/:device_id/feeding-events',
       {

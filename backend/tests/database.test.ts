@@ -689,4 +689,22 @@ test('scheduled feeding repository accepts offline events idempotently', async (
     feedingId: randomUUID(),
     deviceId: randomUUID(),
   })).kind, 'not_found');
+
+  const firstPage = await repository.list(deviceId, 1, null);
+  assert.equal(firstPage?.items.length, 1);
+  assert.ok(firstPage?.nextCursor);
+  const secondPage = await repository.list(deviceId, 1, firstPage?.nextCursor ?? null);
+  assert.equal(secondPage?.items.length, 1);
+  assert.equal(secondPage?.nextCursor, null);
+  assert.deepEqual(
+    new Set([
+      ...(firstPage?.items.map((item) => item.feedingId) ?? []),
+      ...(secondPage?.items.map((item) => item.feedingId) ?? []),
+    ]),
+    new Set([
+      values.feedingId,
+      failed.kind === 'created' ? failed.event.feedingId : '',
+    ]),
+  );
+  assert.equal(await repository.list(randomUUID(), 50, null), null);
 });

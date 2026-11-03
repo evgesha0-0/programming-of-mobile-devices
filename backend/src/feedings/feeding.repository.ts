@@ -3,6 +3,11 @@ import type { QueryResultRow } from 'pg';
 import type { QueryExecutor } from '../devices/device.repository.js';
 import type {
   CreateScheduledFeedingEventResult,
+  FeedingHistoryCursor,
+  FeedingHistoryItemRecord,
+  FeedingHistoryPageRecord,
+  FeedingSource,
+  FeedingStatus,
   ScheduledFeedingEventRecord,
   ScheduledFeedingEventValues,
   ScheduledFeedingStatus,
@@ -20,6 +25,11 @@ export interface FeedingRepository {
   createScheduledEvent(
     values: ScheduledFeedingEventValues,
   ): Promise<CreateScheduledFeedingEventResult>;
+  list(
+    deviceId: string,
+    limit: number,
+    cursor: FeedingHistoryCursor | null,
+  ): Promise<FeedingHistoryPageRecord | null>;
 }
 
 interface ScheduledFeedingRow extends QueryResultRow {
@@ -38,8 +48,70 @@ interface ScheduledFeedingRow extends QueryResultRow {
   received_at: Date | string;
 }
 
+interface FeedingHistoryRow extends QueryResultRow {
+  feeding_id: string;
+  device_id: string;
+  schedule_id: string | null;
+  command_id: string | null;
+  source: FeedingSource;
+  portion_grams: string | number;
+  actual_grams: string | number | null;
+  status: FeedingStatus;
+  created_at: Date | string;
+  cursor_created_at: string;
+  started_at: Date | string | null;
+  finished_at: Date | string | null;
+  error_code: string | null;
+}
+
 export function createFeedingRepository(database: FeedingDatabase): FeedingRepository {
   return {
+    async list(deviceId, limit, cursor) {
+      const device = await database.query(
+        'SELECT device_id FROM devices WHERE device_id = $1',
+        [deviceId],
+      );
+      if (device.rows.length === 0) return null;
+
+      const cursorCondition = cursor
+        ? 'AND (created_at, feeding_id) < ($2::timestamptz, $3)'
+        : '';
+      const values = cursor
+        ? [deviceId, cursor.createdAt, cursor.feedingId, limit + 1]
+        : [deviceId, limit + 1];
+      const limitParameter = cursor ? '$4' : '$2';
+      const result = await database.query<FeedingHistoryRow>(
+        `SELECT
+           feeding_id,
+           device_id,
+           schedule_id,
+           command_id,
+           source,
+           portion_grams,
+           actual_grams,
+           status,
+           created_at,
+           created_at::text AS cursor_created_at,
+           started_at,
+           finished_at,
+           error_code
+         FROM feedings
+         WHERE device_id = $1 ${cursorCondition}
+         ORDER BY created_at DESC, feeding_id DESC
+         LIMIT ${limitParameter}`,
+        values,
+      );
+      const hasMore = result.rows.length > limit;
+      const pageRows = result.rows.slice(0, limit);
+      const items = pageRows.map(toHistoryItem);
+      const last = hasMore ? pageRows.at(-1) : undefined;
+      return {
+        items,
+        nextCursor: last
+          ? { createdAt: last.cursor_created_at, feedingId: last.feeding_id }
+          : null,
+      };
+    },
     async createScheduledEvent(values) {
       const client = await database.connect();
       try {
@@ -124,6 +196,23 @@ export function createFeedingRepository(database: FeedingDatabase): FeedingRepos
         client.release();
       }
     },
+  };
+}
+
+function toHistoryItem(row: FeedingHistoryRow): FeedingHistoryItemRecord {
+  return {
+    feedingId: row.feeding_id,
+    deviceId: row.device_id,
+    scheduleId: row.schedule_id,
+    commandId: row.command_id,
+    source: row.source,
+    portionGrams: String(row.portion_grams),
+    actualGrams: row.actual_grams === null ? null : String(row.actual_grams),
+    status: row.status,
+    createdAt: toDate(row.created_at),
+    startedAt: nullableDate(row.started_at),
+    finishedAt: nullableDate(row.finished_at),
+    errorCode: row.error_code,
   };
 }
 

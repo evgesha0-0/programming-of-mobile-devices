@@ -31,6 +31,7 @@ const unusedScheduleRepository: ScheduleRepository = {
 };
 const unusedFeedingRepository: FeedingRepository = {
   async createScheduledEvent() { throw new Error('Feeding repository must not be used by command routes'); },
+  async list() { throw new Error('Feeding repository must not be used by command routes'); },
 };
 
 function memoryRepository(): CommandRepository {
