@@ -15,6 +15,7 @@ export interface AppConfig {
   host: string;
   port: number;
   logLevel: string;
+  deviceOfflineAfterSeconds: number;
   database: DatabaseConfig;
 }
 
@@ -24,6 +25,12 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): AppConfig {
     host: source.HOST?.trim() || '0.0.0.0',
     port: getPort(source.PORT, 'PORT', 3000),
     logLevel: source.LOG_LEVEL?.trim() || 'info',
+    deviceOfflineAfterSeconds: getPositiveInteger(
+      source.DEVICE_OFFLINE_AFTER_SECONDS,
+      'DEVICE_OFFLINE_AFTER_SECONDS',
+      120,
+      86_400,
+    ),
     database: Object.freeze({
       host: getRequiredValue(source.DB_HOST, 'DB_HOST'),
       port: getPort(source.DB_PORT, 'DB_PORT', 5432),
@@ -32,6 +39,19 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): AppConfig {
       password: getRequiredValue(source.DB_PASSWORD, 'DB_PASSWORD'),
     }),
   });
+}
+
+function getPositiveInteger(
+  value: string | undefined,
+  name: string,
+  defaultValue: number,
+  maximum: number,
+): number {
+  const result = Number(value ?? defaultValue);
+  if (!Number.isSafeInteger(result) || result < 1 || result > maximum) {
+    throw new Error(`Environment variable ${name} must be an integer from 1 to ${maximum}`);
+  }
+  return result;
 }
 
 function getNodeEnvironment(value: string | undefined): NodeEnvironment {

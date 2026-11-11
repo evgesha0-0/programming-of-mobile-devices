@@ -17,6 +17,7 @@ async function start(): Promise<void> {
     checkDatabase: () => checkDatabaseConnection(pool),
     commandRepository: createCommandRepository(pool),
     deviceRepository: createDeviceRepository(pool),
+    deviceOfflineAfterMs: env.deviceOfflineAfterSeconds * 1_000,
     feedingRepository: createFeedingRepository(pool),
     scheduleRepository: createScheduleRepository(pool),
     logger: { level: env.logLevel },

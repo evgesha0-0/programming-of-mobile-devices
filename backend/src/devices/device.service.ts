@@ -35,11 +35,21 @@ export interface DeviceService {
   reportState(deviceId: string, input: ReportDeviceStateInput): Promise<ReportDeviceStateResponse>;
 }
 
-export function createDeviceService(repository: DeviceRepository): DeviceService {
+export const DEFAULT_DEVICE_OFFLINE_AFTER_MS = 120_000;
+
+export function createDeviceService(
+  repository: DeviceRepository,
+  offlineAfterMs = DEFAULT_DEVICE_OFFLINE_AFTER_MS,
+  now: () => Date = () => new Date(),
+): DeviceService {
+  if (!Number.isSafeInteger(offlineAfterMs) || offlineAfterMs < 1) {
+    throw new Error('Device offline threshold must be a positive integer');
+  }
+
   return {
     async getState(deviceId) {
       const state = await requireState(repository, deviceId);
-      return toStateResponse(state);
+      return toStateResponse(state, now(), offlineAfterMs);
     },
 
     async reportState(deviceId, input) {
@@ -67,7 +77,7 @@ export function createDeviceService(repository: DeviceRepository): DeviceService
           device_id: current.deviceId,
           status: current.status,
           last_seen_at: requireLastSeenAt(current).toISOString(),
-          server_time: new Date().toISOString(),
+          server_time: now().toISOString(),
         };
       }
 
@@ -82,7 +92,11 @@ async function requireState(repository: DeviceRepository, deviceId: string): Pro
   return state;
 }
 
-function toStateResponse(state: DeviceStateRecord): DeviceStateResponse {
+function toStateResponse(
+  state: DeviceStateRecord,
+  currentTime: Date,
+  offlineAfterMs: number,
+): DeviceStateResponse {
   const revision = Number(state.scheduleRevision);
   if (!Number.isSafeInteger(revision)) throw new Error('Schedule revision exceeds JSON integer range');
 
@@ -92,11 +106,21 @@ function toStateResponse(state: DeviceStateRecord): DeviceStateResponse {
 
   return {
     device_id: state.deviceId,
-    status: state.status,
+    status: effectiveStatus(state, currentTime, offlineAfterMs),
     last_seen_at: state.lastSeenAt?.toISOString() ?? null,
     last_error: lastError,
     schedule_revision: revision,
   };
+}
+
+function effectiveStatus(
+  state: DeviceStateRecord,
+  currentTime: Date,
+  offlineAfterMs: number,
+): DeviceStateRecord['status'] {
+  if (state.lastSeenAt === null) return 'unknown';
+  if (currentTime.getTime() - state.lastSeenAt.getTime() >= offlineAfterMs) return 'offline';
+  return state.status;
 }
 
 function isExactRepeat(state: DeviceStateRecord, update: DeviceStateUpdate): boolean {

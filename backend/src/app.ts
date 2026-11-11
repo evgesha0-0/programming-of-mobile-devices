@@ -25,6 +25,8 @@ export interface BuildAppOptions {
   deviceRepository: DeviceRepository;
   feedingRepository: FeedingRepository;
   scheduleRepository: ScheduleRepository;
+  deviceOfflineAfterMs?: number;
+  deviceStateNow?: () => Date;
   logger?: FastifyServerOptions['logger'];
 }
 
@@ -41,7 +43,11 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
   app.setErrorHandler(errorHandler);
   await app.register(createHealthRoutes(options.checkDatabase));
   await app.register(createCommandRoutes(createCommandService(options.commandRepository)));
-  await app.register(createDeviceStateRoutes(createDeviceService(options.deviceRepository)));
+  await app.register(createDeviceStateRoutes(createDeviceService(
+    options.deviceRepository,
+    options.deviceOfflineAfterMs,
+    options.deviceStateNow,
+  )));
   await app.register(createScheduleRoutes(createScheduleService(options.scheduleRepository)));
   await app.register(createFeedingRoutes(createFeedingService(options.feedingRepository)));
 

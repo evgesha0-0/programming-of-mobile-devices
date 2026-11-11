@@ -13,6 +13,7 @@ import type { ScheduleRepository } from '../src/schedules/schedule.repository.js
 import type { FeedingRepository } from '../src/feedings/feeding.repository.js';
 
 const deviceId = 'd6d174f4-e79f-49d1-9476-78bc99483752';
+const defaultNow = new Date('2026-10-17T08:17:29.999Z');
 const unusedCommandRepository: CommandRepository = {
   async create() { throw new Error('Command repository must not be used by device routes'); },
   async listPending() { throw new Error('Command repository must not be used by device routes'); },
@@ -65,15 +66,57 @@ function repository(initial: DeviceStateRecord | null): DeviceRepository {
   };
 }
 
-async function appWith(deviceRepository: DeviceRepository) {
+async function appWith(
+  deviceRepository: DeviceRepository,
+  now: () => Date = () => defaultNow,
+) {
   return buildApp({
     checkDatabase: async () => undefined,
     commandRepository: unusedCommandRepository,
     deviceRepository,
+    deviceOfflineAfterMs: 120_000,
+    deviceStateNow: now,
     feedingRepository: unusedFeedingRepository,
     scheduleRepository: unusedScheduleRepository,
   });
 }
+
+test('GET device state computes offline at the configured last_seen_at boundary', async (t) => {
+  const deviceRepository = repository(initialState());
+  let currentTime = new Date('2026-10-17T08:17:29.999Z');
+  const app = await appWith(deviceRepository, () => currentTime);
+  t.after(() => app.close());
+
+  const fresh = await app.inject({
+    method: 'GET',
+    url: `/api/v1/devices/${deviceId}/state`,
+  });
+  assert.equal(fresh.statusCode, 200);
+  assert.equal(fresh.json().status, 'error');
+
+  currentTime = new Date('2026-10-17T08:17:30.000Z');
+  const stale = await app.inject({
+    method: 'GET',
+    url: `/api/v1/devices/${deviceId}/state`,
+  });
+  assert.equal(stale.statusCode, 200);
+  assert.equal(stale.json().status, 'offline');
+  assert.equal((await deviceRepository.findState(deviceId))?.status, 'error');
+});
+
+test('GET device state returns unknown before the first accepted report', async (t) => {
+  const state = { ...initialState(), status: 'online' as const, lastSeenAt: null };
+  const app = await appWith(repository(state));
+  t.after(() => app.close());
+
+  const response = await app.inject({
+    method: 'GET',
+    url: `/api/v1/devices/${deviceId}/state`,
+  });
+  assert.equal(response.statusCode, 200);
+  assert.equal(response.json().status, 'unknown');
+  assert.equal(response.json().last_seen_at, null);
+});
 
 test('GET device state returns the documented representation', async (t) => {
   const app = await appWith(repository(initialState()));
