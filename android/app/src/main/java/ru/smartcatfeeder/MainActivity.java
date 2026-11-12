@@ -99,6 +99,8 @@ public final class MainActivity extends Activity {
             showDeviceStateScreen(container);
         } else if (screen == AppScreen.SCHEDULES) {
             showSchedulesScreen(container);
+        } else if (screen == AppScreen.HISTORY) {
+            showHistoryScreen(container);
         } else {
             showPlaceholderScreen(container, screen);
         }
@@ -498,6 +500,133 @@ public final class MainActivity extends Activity {
         loadError.setVisibility(View.VISIBLE);
         content.findViewById(R.id.schedules_add).setEnabled(true);
         content.findViewById(R.id.schedules_refresh).setEnabled(true);
+    }
+
+    private void showHistoryScreen(FrameLayout container) {
+        View content = LayoutInflater.from(this)
+                .inflate(R.layout.screen_history, container, false);
+        container.addView(content);
+        FeedingHistoryState state = new FeedingHistoryState();
+        content.findViewById(R.id.history_refresh)
+                .setOnClickListener(view -> loadHistory(content, state, true));
+        content.findViewById(R.id.history_load_more)
+                .setOnClickListener(view -> loadHistory(content, state, false));
+        loadHistory(content, state, true);
+    }
+
+    private void loadHistory(View content, FeedingHistoryState state, boolean firstPage) {
+        String cursor = firstPage ? null : state.nextCursor();
+        if (!firstPage && cursor == null) {
+            return;
+        }
+
+        cancelScreenRequest();
+        content.findViewById(R.id.history_progress).setVisibility(View.VISIBLE);
+        content.findViewById(R.id.history_load_error).setVisibility(View.GONE);
+        content.findViewById(R.id.history_empty).setVisibility(View.GONE);
+        content.findViewById(R.id.history_load_more).setEnabled(false);
+        content.findViewById(R.id.history_refresh).setEnabled(false);
+
+        int requestVersion = ++screenRequestVersion;
+        ConnectionSettings settings = connectionSession.requireSettings();
+        screenRequest = networkExecutor.submit(() -> {
+            try {
+                FeedingHistoryPage page = new FeederRepository(settings)
+                        .getFeedingHistory(50, cursor);
+                runOnUiThread(() -> showHistoryResult(
+                        content,
+                        state,
+                        page,
+                        firstPage,
+                        requestVersion
+                ));
+            } catch (IOException error) {
+                runOnUiThread(() -> showHistoryFailure(content, state, requestVersion));
+            }
+        });
+    }
+
+    private void showHistoryResult(
+            View content,
+            FeedingHistoryState state,
+            FeedingHistoryPage page,
+            boolean firstPage,
+            int requestVersion
+    ) {
+        if (!canApplyScreenResult(content, requestVersion, AppScreen.HISTORY)) {
+            return;
+        }
+        if (firstPage) {
+            state.applyFirstPage(page);
+        } else {
+            state.appendPage(page);
+        }
+        renderHistory(content, state);
+    }
+
+    private void renderHistory(View content, FeedingHistoryState state) {
+        LinearLayout list = content.findViewById(R.id.history_list);
+        list.removeAllViews();
+        for (Feeding feeding : state.items()) {
+            addFeedingItem(list, FeedingViewData.from(feeding, ZoneId.systemDefault()));
+        }
+
+        boolean empty = state.items().isEmpty();
+        content.findViewById(R.id.history_progress).setVisibility(View.GONE);
+        content.findViewById(R.id.history_load_error).setVisibility(View.GONE);
+        content.findViewById(R.id.history_empty).setVisibility(
+                empty ? View.VISIBLE : View.GONE
+        );
+        View loadMore = content.findViewById(R.id.history_load_more);
+        loadMore.setVisibility(state.hasMore() ? View.VISIBLE : View.GONE);
+        loadMore.setEnabled(true);
+        content.findViewById(R.id.history_refresh).setEnabled(true);
+    }
+
+    private void addFeedingItem(LinearLayout list, FeedingViewData data) {
+        View item = LayoutInflater.from(this).inflate(R.layout.item_feeding, list, false);
+        ((TextView) item.findViewById(R.id.feeding_created_at)).setText(data.createdAt);
+        ((TextView) item.findViewById(R.id.feeding_source)).setText(data.sourceTextResource);
+
+        TextView status = item.findViewById(R.id.feeding_status);
+        status.setText(data.statusTextResource);
+        status.setTextColor(getColor(data.statusColorResource));
+        ((TextView) item.findViewById(R.id.feeding_portion)).setText(
+                getString(R.string.feeding_portion, data.portionGrams)
+        );
+
+        TextView actual = item.findViewById(R.id.feeding_actual);
+        if (data.actualGrams == null) {
+            actual.setVisibility(View.GONE);
+        } else {
+            actual.setText(getString(R.string.feeding_actual, data.actualGrams));
+            actual.setVisibility(View.VISIBLE);
+        }
+
+        TextView feedingError = item.findViewById(R.id.feeding_error);
+        if (data.errorDetails == null) {
+            feedingError.setVisibility(View.GONE);
+        } else {
+            feedingError.setText(data.errorDetails);
+            feedingError.setVisibility(View.VISIBLE);
+        }
+        list.addView(item);
+    }
+
+    private void showHistoryFailure(
+            View content,
+            FeedingHistoryState state,
+            int requestVersion
+    ) {
+        if (!canApplyScreenResult(content, requestVersion, AppScreen.HISTORY)) {
+            return;
+        }
+        content.findViewById(R.id.history_progress).setVisibility(View.GONE);
+        content.findViewById(R.id.history_load_error).setVisibility(View.VISIBLE);
+        View loadMore = content.findViewById(R.id.history_load_more);
+        loadMore.setVisibility(state.hasMore() ? View.VISIBLE : View.GONE);
+        loadMore.setEnabled(true);
+        content.findViewById(R.id.history_refresh).setEnabled(true);
     }
 
     private static CheckBox[] scheduleDayInputs(View form) {
