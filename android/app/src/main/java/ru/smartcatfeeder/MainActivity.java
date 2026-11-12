@@ -1,6 +1,7 @@
 package ru.smartcatfeeder;
 
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.os.Bundle;
 import android.text.InputType;
 import android.view.LayoutInflater;
@@ -12,6 +13,7 @@ import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.ProgressBar;
 import android.widget.TextView;
+import android.widget.TimePicker;
 import android.widget.Toast;
 
 import java.io.IOException;
@@ -262,6 +264,8 @@ public final class MainActivity extends Activity {
         View content = LayoutInflater.from(this)
                 .inflate(R.layout.screen_schedules, container, false);
         container.addView(content);
+        content.findViewById(R.id.schedules_add)
+                .setOnClickListener(view -> showScheduleEditor(content, null));
         content.findViewById(R.id.schedules_refresh)
                 .setOnClickListener(view -> loadSchedules(content));
         loadSchedules(content);
@@ -271,6 +275,7 @@ public final class MainActivity extends Activity {
         content.findViewById(R.id.schedules_progress).setVisibility(View.VISIBLE);
         content.findViewById(R.id.schedules_load_error).setVisibility(View.GONE);
         content.findViewById(R.id.schedules_empty).setVisibility(View.GONE);
+        content.findViewById(R.id.schedules_add).setEnabled(false);
         content.findViewById(R.id.schedules_refresh).setEnabled(false);
 
         int requestVersion = ++screenRequestVersion;
@@ -303,7 +308,7 @@ public final class MainActivity extends Activity {
         LinearLayout list = content.findViewById(R.id.schedules_list);
         list.removeAllViews();
         for (Schedule schedule : schedules.items) {
-            addScheduleItem(list, ScheduleViewData.from(schedule));
+            addScheduleItem(content, list, schedule);
         }
 
         content.findViewById(R.id.schedules_progress).setVisibility(View.GONE);
@@ -311,10 +316,12 @@ public final class MainActivity extends Activity {
         content.findViewById(R.id.schedules_empty).setVisibility(
                 schedules.items.isEmpty() ? View.VISIBLE : View.GONE
         );
+        content.findViewById(R.id.schedules_add).setEnabled(true);
         content.findViewById(R.id.schedules_refresh).setEnabled(true);
     }
 
-    private void addScheduleItem(LinearLayout list, ScheduleViewData data) {
+    private void addScheduleItem(View content, LinearLayout list, Schedule schedule) {
+        ScheduleViewData data = ScheduleViewData.from(schedule);
         View item = LayoutInflater.from(this).inflate(R.layout.item_schedule, list, false);
         ((TextView) item.findViewById(R.id.schedule_time)).setText(data.time);
 
@@ -336,6 +343,7 @@ public final class MainActivity extends Activity {
         ((TextView) item.findViewById(R.id.schedule_portion)).setText(
                 getString(R.string.schedule_portion, data.portionGrams)
         );
+        item.setOnClickListener(view -> showScheduleEditor(content, schedule));
         list.addView(item);
     }
 
@@ -344,8 +352,171 @@ public final class MainActivity extends Activity {
             return;
         }
         content.findViewById(R.id.schedules_progress).setVisibility(View.GONE);
-        content.findViewById(R.id.schedules_load_error).setVisibility(View.VISIBLE);
+        TextView loadError = content.findViewById(R.id.schedules_load_error);
+        loadError.setText(R.string.schedules_load_failed);
+        loadError.setVisibility(View.VISIBLE);
+        content.findViewById(R.id.schedules_add).setEnabled(true);
         content.findViewById(R.id.schedules_refresh).setEnabled(true);
+    }
+
+    private void showScheduleEditor(View content, Schedule schedule) {
+        View form = LayoutInflater.from(this).inflate(R.layout.dialog_schedule, null, false);
+        TimePicker time = form.findViewById(R.id.schedule_editor_time);
+        time.setIs24HourView(true);
+        CheckBox[] days = scheduleDayInputs(form);
+        EditText timezone = form.findViewById(R.id.schedule_timezone_input);
+        EditText portion = form.findViewById(R.id.schedule_portion_input);
+        CheckBox active = form.findViewById(R.id.schedule_active_input);
+        TextView error = form.findViewById(R.id.schedule_editor_error);
+
+        if (schedule == null) {
+            timezone.setText(ZoneId.systemDefault().getId());
+        } else {
+            time.setHour(schedule.timeLocal.getHour());
+            time.setMinute(schedule.timeLocal.getMinute());
+            setSelectedScheduleDays(days, schedule.daysOfWeek);
+            timezone.setText(schedule.timezone.getId());
+            portion.setText(schedule.portionGrams.stripTrailingZeros().toPlainString());
+            active.setChecked(schedule.active);
+        }
+
+        AlertDialog.Builder builder = new AlertDialog.Builder(this)
+                .setTitle(schedule == null
+                        ? R.string.schedule_editor_create_title
+                        : R.string.schedule_editor_update_title)
+                .setView(form)
+                .setPositiveButton(R.string.schedule_editor_save, null)
+                .setNegativeButton(R.string.schedule_editor_cancel, null);
+        if (schedule != null) {
+            builder.setNeutralButton(
+                    R.string.schedule_editor_delete,
+                    (dialog, which) -> confirmScheduleDeletion(content, schedule)
+            );
+        }
+
+        AlertDialog dialog = builder.create();
+        dialog.setOnShowListener(ignored -> dialog.getButton(AlertDialog.BUTTON_POSITIVE)
+                .setOnClickListener(view -> {
+                    boolean[] selectedDays = new boolean[days.length];
+                    for (int index = 0; index < days.length; index++) {
+                        selectedDays[index] = days[index].isChecked();
+                    }
+
+                    ScheduleRequest request;
+                    try {
+                        request = ScheduleEditorInput.toRequest(
+                                time.getHour(),
+                                time.getMinute(),
+                                selectedDays,
+                                timezone.getText().toString(),
+                                portion.getText().toString(),
+                                active.isChecked()
+                        );
+                    } catch (IllegalArgumentException validationError) {
+                        error.setText(validationError.getMessage());
+                        error.setVisibility(View.VISIBLE);
+                        return;
+                    }
+
+                    dialog.dismiss();
+                    if (schedule == null) {
+                        runScheduleMutation(
+                                content,
+                                repository -> repository.createSchedule(request),
+                                R.string.schedule_created
+                        );
+                    } else {
+                        runScheduleMutation(
+                                content,
+                                repository -> repository.updateSchedule(
+                                        schedule.scheduleId,
+                                        request
+                                ),
+                                R.string.schedule_updated
+                        );
+                    }
+                }));
+        dialog.show();
+    }
+
+    private void confirmScheduleDeletion(View content, Schedule schedule) {
+        new AlertDialog.Builder(this)
+                .setTitle(R.string.schedule_delete_title)
+                .setMessage(R.string.schedule_delete_message)
+                .setPositiveButton(
+                        R.string.schedule_editor_delete,
+                        (dialog, which) -> runScheduleMutation(
+                                content,
+                                repository -> repository.deleteSchedule(schedule.scheduleId),
+                                R.string.schedule_deleted
+                        )
+                )
+                .setNegativeButton(R.string.schedule_editor_cancel, null)
+                .show();
+    }
+
+    private void runScheduleMutation(
+            View content,
+            ScheduleMutation mutation,
+            int successMessage
+    ) {
+        cancelScreenRequest();
+        content.findViewById(R.id.schedules_progress).setVisibility(View.VISIBLE);
+        content.findViewById(R.id.schedules_load_error).setVisibility(View.GONE);
+        content.findViewById(R.id.schedules_add).setEnabled(false);
+        content.findViewById(R.id.schedules_refresh).setEnabled(false);
+
+        int requestVersion = ++screenRequestVersion;
+        ConnectionSettings settings = connectionSession.requireSettings();
+        screenRequest = networkExecutor.submit(() -> {
+            try {
+                mutation.execute(new FeederRepository(settings));
+                runOnUiThread(() -> {
+                    if (!canApplyScreenResult(
+                            content,
+                            requestVersion,
+                            AppScreen.SCHEDULES
+                    )) {
+                        return;
+                    }
+                    Toast.makeText(this, successMessage, Toast.LENGTH_SHORT).show();
+                    loadSchedules(content);
+                });
+            } catch (IOException error) {
+                runOnUiThread(() -> showScheduleMutationFailure(content, requestVersion));
+            }
+        });
+    }
+
+    private void showScheduleMutationFailure(View content, int requestVersion) {
+        if (!canApplyScreenResult(content, requestVersion, AppScreen.SCHEDULES)) {
+            return;
+        }
+        content.findViewById(R.id.schedules_progress).setVisibility(View.GONE);
+        TextView loadError = content.findViewById(R.id.schedules_load_error);
+        loadError.setText(R.string.schedule_change_failed);
+        loadError.setVisibility(View.VISIBLE);
+        content.findViewById(R.id.schedules_add).setEnabled(true);
+        content.findViewById(R.id.schedules_refresh).setEnabled(true);
+    }
+
+    private static CheckBox[] scheduleDayInputs(View form) {
+        return new CheckBox[]{
+                form.findViewById(R.id.schedule_day_mon),
+                form.findViewById(R.id.schedule_day_tue),
+                form.findViewById(R.id.schedule_day_wed),
+                form.findViewById(R.id.schedule_day_thu),
+                form.findViewById(R.id.schedule_day_fri),
+                form.findViewById(R.id.schedule_day_sat),
+                form.findViewById(R.id.schedule_day_sun)
+        };
+    }
+
+    private static void setSelectedScheduleDays(CheckBox[] inputs, java.util.List<String> days) {
+        String[] values = {"mon", "tue", "wed", "thu", "fri", "sat", "sun"};
+        for (int index = 0; index < values.length; index++) {
+            inputs[index].setChecked(days.contains(values[index]));
+        }
     }
 
     private boolean canApplyScreenResult(
@@ -365,6 +536,10 @@ public final class MainActivity extends Activity {
             screenRequest.cancel(true);
             screenRequest = null;
         }
+    }
+
+    private interface ScheduleMutation {
+        void execute(FeederRepository repository) throws IOException;
     }
 
     private static void showConnectionError(TextView errorView, String message) {
