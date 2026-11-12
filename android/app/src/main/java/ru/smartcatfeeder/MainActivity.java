@@ -9,6 +9,7 @@ import android.widget.Button;
 import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.FrameLayout;
+import android.widget.LinearLayout;
 import android.widget.ProgressBar;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -27,8 +28,8 @@ public final class MainActivity extends Activity {
     private ConnectionSettingsStore connectionStore;
     private ConnectionSession connectionSession;
     private ExecutorService networkExecutor;
-    private Future<?> deviceStateRequest;
-    private int deviceStateRequestVersion;
+    private Future<?> screenRequest;
+    private int screenRequestVersion;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -43,7 +44,7 @@ public final class MainActivity extends Activity {
                 getSharedPreferences(CONNECTION_PREFERENCES, MODE_PRIVATE),
                 BuildConfig.DEBUG
         );
-        networkExecutor = Executors.newSingleThreadExecutor();
+        networkExecutor = Executors.newFixedThreadPool(2);
 
         String restoredScreen = savedInstanceState == null || !connectionSession.isConnected()
                 ? null
@@ -66,7 +67,7 @@ public final class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
-        cancelDeviceStateRequest();
+        cancelScreenRequest();
         networkExecutor.shutdownNow();
         super.onDestroy();
     }
@@ -87,13 +88,15 @@ public final class MainActivity extends Activity {
     }
 
     private void showScreen(AppScreen screen) {
-        cancelDeviceStateRequest();
+        cancelScreenRequest();
         FrameLayout container = findViewById(R.id.screen_content);
         container.removeAllViews();
         if (screen == AppScreen.CONNECTION) {
             showConnectionScreen(container);
         } else if (screen == AppScreen.DEVICE_STATE) {
             showDeviceStateScreen(container);
+        } else if (screen == AppScreen.SCHEDULES) {
+            showSchedulesScreen(container);
         } else {
             showPlaceholderScreen(container, screen);
         }
@@ -201,9 +204,9 @@ public final class MainActivity extends Activity {
         loadError.setVisibility(View.GONE);
         refresh.setEnabled(false);
 
-        int requestVersion = ++deviceStateRequestVersion;
+        int requestVersion = ++screenRequestVersion;
         ConnectionSettings settings = connectionSession.requireSettings();
-        deviceStateRequest = networkExecutor.submit(() -> {
+        screenRequest = networkExecutor.submit(() -> {
             try {
                 DeviceState state = new FeederRepository(settings).getDeviceState();
                 runOnUiThread(() -> showDeviceStateResult(content, state, requestVersion));
@@ -214,7 +217,7 @@ public final class MainActivity extends Activity {
     }
 
     private void showDeviceStateResult(View content, DeviceState state, int requestVersion) {
-        if (!canApplyDeviceStateResult(content, requestVersion)) {
+        if (!canApplyScreenResult(content, requestVersion, AppScreen.DEVICE_STATE)) {
             return;
         }
         DeviceStateViewData data = DeviceStateViewData.from(state, ZoneId.systemDefault());
@@ -245,7 +248,7 @@ public final class MainActivity extends Activity {
     }
 
     private void showDeviceStateFailure(View content, int requestVersion) {
-        if (!canApplyDeviceStateResult(content, requestVersion)) {
+        if (!canApplyScreenResult(content, requestVersion, AppScreen.DEVICE_STATE)) {
             return;
         }
         content.findViewById(R.id.device_state_progress).setVisibility(View.GONE);
@@ -255,18 +258,112 @@ public final class MainActivity extends Activity {
         content.findViewById(R.id.device_state_refresh).setEnabled(true);
     }
 
-    private boolean canApplyDeviceStateResult(View content, int requestVersion) {
-        return !isDestroyed()
-                && content.isAttachedToWindow()
-                && requestVersion == deviceStateRequestVersion
-                && navigator.currentScreen() == AppScreen.DEVICE_STATE;
+    private void showSchedulesScreen(FrameLayout container) {
+        View content = LayoutInflater.from(this)
+                .inflate(R.layout.screen_schedules, container, false);
+        container.addView(content);
+        content.findViewById(R.id.schedules_refresh)
+                .setOnClickListener(view -> loadSchedules(content));
+        loadSchedules(content);
     }
 
-    private void cancelDeviceStateRequest() {
-        deviceStateRequestVersion++;
-        if (deviceStateRequest != null) {
-            deviceStateRequest.cancel(true);
-            deviceStateRequest = null;
+    private void loadSchedules(View content) {
+        content.findViewById(R.id.schedules_progress).setVisibility(View.VISIBLE);
+        content.findViewById(R.id.schedules_load_error).setVisibility(View.GONE);
+        content.findViewById(R.id.schedules_empty).setVisibility(View.GONE);
+        content.findViewById(R.id.schedules_refresh).setEnabled(false);
+
+        int requestVersion = ++screenRequestVersion;
+        ConnectionSettings settings = connectionSession.requireSettings();
+        screenRequest = networkExecutor.submit(() -> {
+            try {
+                ScheduleList schedules = new FeederRepository(settings).getSchedules();
+                runOnUiThread(() -> showSchedulesResult(content, schedules, requestVersion));
+            } catch (IOException error) {
+                runOnUiThread(() -> showSchedulesFailure(content, requestVersion));
+            }
+        });
+    }
+
+    private void showSchedulesResult(
+            View content,
+            ScheduleList schedules,
+            int requestVersion
+    ) {
+        if (!canApplyScreenResult(content, requestVersion, AppScreen.SCHEDULES)) {
+            return;
+        }
+        TextView revision = content.findViewById(R.id.schedules_revision);
+        revision.setText(getString(
+                R.string.schedules_revision,
+                Long.toString(schedules.scheduleRevision)
+        ));
+        revision.setVisibility(View.VISIBLE);
+
+        LinearLayout list = content.findViewById(R.id.schedules_list);
+        list.removeAllViews();
+        for (Schedule schedule : schedules.items) {
+            addScheduleItem(list, ScheduleViewData.from(schedule));
+        }
+
+        content.findViewById(R.id.schedules_progress).setVisibility(View.GONE);
+        content.findViewById(R.id.schedules_load_error).setVisibility(View.GONE);
+        content.findViewById(R.id.schedules_empty).setVisibility(
+                schedules.items.isEmpty() ? View.VISIBLE : View.GONE
+        );
+        content.findViewById(R.id.schedules_refresh).setEnabled(true);
+    }
+
+    private void addScheduleItem(LinearLayout list, ScheduleViewData data) {
+        View item = LayoutInflater.from(this).inflate(R.layout.item_schedule, list, false);
+        ((TextView) item.findViewById(R.id.schedule_time)).setText(data.time);
+
+        TextView active = item.findViewById(R.id.schedule_active);
+        active.setText(data.active ? R.string.schedule_active : R.string.schedule_inactive);
+        active.setTextColor(getColor(data.active ? R.color.status_online : R.color.text_secondary));
+
+        StringBuilder days = new StringBuilder();
+        for (int resource : data.dayTextResources) {
+            if (days.length() > 0) {
+                days.append(", ");
+            }
+            days.append(getString(resource));
+        }
+        ((TextView) item.findViewById(R.id.schedule_days)).setText(days.toString());
+        ((TextView) item.findViewById(R.id.schedule_timezone)).setText(
+                getString(R.string.schedule_timezone, data.timezone)
+        );
+        ((TextView) item.findViewById(R.id.schedule_portion)).setText(
+                getString(R.string.schedule_portion, data.portionGrams)
+        );
+        list.addView(item);
+    }
+
+    private void showSchedulesFailure(View content, int requestVersion) {
+        if (!canApplyScreenResult(content, requestVersion, AppScreen.SCHEDULES)) {
+            return;
+        }
+        content.findViewById(R.id.schedules_progress).setVisibility(View.GONE);
+        content.findViewById(R.id.schedules_load_error).setVisibility(View.VISIBLE);
+        content.findViewById(R.id.schedules_refresh).setEnabled(true);
+    }
+
+    private boolean canApplyScreenResult(
+            View content,
+            int requestVersion,
+            AppScreen expectedScreen
+    ) {
+        return !isDestroyed()
+                && content.isAttachedToWindow()
+                && requestVersion == screenRequestVersion
+                && navigator.currentScreen() == expectedScreen;
+    }
+
+    private void cancelScreenRequest() {
+        screenRequestVersion++;
+        if (screenRequest != null) {
+            screenRequest.cancel(true);
+            screenRequest = null;
         }
     }
 
