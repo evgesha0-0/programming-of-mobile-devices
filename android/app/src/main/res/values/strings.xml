@@ -1,7 +1,23 @@
 <resources>
     <string name="app_name">Smart Cat Feeder</string>
     <string name="screen_connection_title">Подключение</string>
-    <string name="screen_connection_placeholder">Настройки безопасного подключения появятся на следующем этапе</string>
+    <string name="screen_connection_placeholder">Введите параметры безопасного подключения</string>
+    <string name="connection_description">Укажите HTTPS-адрес backend, UUID кормушки и токен доступа.</string>
+    <string name="connection_server_label">Адрес сервера</string>
+    <string name="connection_server_hint">https://feeder.example.org</string>
+    <string name="connection_device_id_label">UUID кормушки</string>
+    <string name="connection_device_id_hint">d6d174f4-e79f-49d1-9476-78bc99483752</string>
+    <string name="connection_token_label">Токен доступа</string>
+    <string name="connection_token_hint">Введите токен</string>
+    <string name="connection_show_token">Показать токен</string>
+    <string name="connection_connect">Подключиться</string>
+    <string name="connection_clear">Удалить сохранённые настройки</string>
+    <string name="connection_token_notice">Токен хранится только в памяти приложения и будет удалён после завершения процесса.</string>
+    <string name="connection_saved">Настройки подключения сохранены</string>
+    <string name="connection_cleared">Сохранённые настройки удалены</string>
+    <string name="connection_save_error">Не удалось сохранить настройки подключения</string>
+    <string name="connection_clear_error">Не удалось удалить сохранённые настройки</string>
+    <string name="connection_required">Сначала настройте подключение</string>
     <string name="screen_device_state_title">Кормушка</string>
     <string name="screen_device_state_placeholder">Здесь будет отображаться состояние кормушки</string>
     <string name="screen_schedules_title">Расписание</string>

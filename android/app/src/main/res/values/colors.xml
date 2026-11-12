@@ -5,4 +5,5 @@
     <color name="surface">#FFFFFF</color>
     <color name="text_primary">#1E3935</color>
     <color name="text_secondary">#526B67</color>
+    <color name="error">#B3261E</color>
 </resources>
