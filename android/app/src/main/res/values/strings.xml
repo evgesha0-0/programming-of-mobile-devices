@@ -1,4 +1,15 @@
 <resources>
     <string name="app_name">Smart Cat Feeder</string>
-    <string name="scaffold_message">Приложение готово к настройке подключения</string>
+    <string name="screen_connection_title">Подключение</string>
+    <string name="screen_connection_placeholder">Настройки безопасного подключения появятся на следующем этапе</string>
+    <string name="screen_device_state_title">Кормушка</string>
+    <string name="screen_device_state_placeholder">Здесь будет отображаться состояние кормушки</string>
+    <string name="screen_schedules_title">Расписание</string>
+    <string name="screen_schedules_placeholder">Здесь появятся запланированные кормления</string>
+    <string name="screen_history_title">История</string>
+    <string name="screen_history_placeholder">Здесь появится история выполненных кормлений</string>
+    <string name="navigation_connection">Подключение</string>
+    <string name="navigation_device_state">Кормушка</string>
+    <string name="navigation_schedules">Расписание</string>
+    <string name="navigation_history">История</string>
 </resources>
