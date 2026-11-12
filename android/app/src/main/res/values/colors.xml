@@ -6,4 +6,6 @@
     <color name="text_primary">#1E3935</color>
     <color name="text_secondary">#526B67</color>
     <color name="error">#B3261E</color>
+    <color name="status_online">#147D3F</color>
+    <color name="status_busy">#9A6700</color>
 </resources>
