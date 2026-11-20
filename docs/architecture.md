@@ -10,15 +10,25 @@ Smart Cat Feeder — автоматизированная система кор�
 flowchart LR
     A[Android-приложение<br/>Java, Android SDK]
     B[Backend<br/>TypeScript, NestJS, PostgreSQL]
+    I[Keycloak<br/>OIDC identity provider]
     K[Linux-приложение на Khadas<br/>TypeScript, Node.js]
     H[Механизм выдачи<br/>и датчик веса]
 
     A <-->|REST API /api/v1<br/>HTTPS| B
+    A <-->|Authorization Code + PKCE| I
+    B -->|OIDC Discovery / JWKS| I
     K <-->|REST API /api/v1<br/>HTTPS, исходящие запросы| B
     K <-->|GPIO / аппаратный интерфейс| H
 ```
 
-Android взаимодействует только с backend. Прямое соединение Android с Khadas не входит в основную архитектуру. Khadas инициирует исходящие REST-запросы к backend, поэтому backend не требуется устанавливать входящее соединение с устройством через интернет.
+Android получает бизнес-данные только через backend, а с Keycloak взаимодействует только для
+входа и обновления пользовательской сессии. Прямое соединение Android с Khadas не входит в
+основную архитектуру. Khadas инициирует исходящие REST-запросы к backend, поэтому backend не
+требуется устанавливать входящее соединение с устройством через интернет.
+
+Пользователь входит через Keycloak в системном браузере Android. Backend проверяет JWT access
+token по OIDC/JWKS, а доступ `owner`/`viewer` к конкретной кормушке определяет по собственной
+membership в PostgreSQL.
 
 ### Backend
 
