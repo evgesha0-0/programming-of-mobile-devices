@@ -66,13 +66,13 @@ async function command(db: PGlite, deviceId: string): Promise<{ commandId: strin
   return { commandId, feedingId };
 }
 
-test('initial migration creates tables, and the second run preserves existing data', async (t) => {
+test('migrations create tables, and the second run preserves existing data', async (t) => {
   const db = new PGlite(); t.after(() => db.close());
-  assert.deepEqual(await runMigrations(client(db)), ['001_initial_schema.sql']);
+  assert.deepEqual(await runMigrations(client(db)), ['001_initial_schema.sql', '002_device_credentials.sql']);
   const id = await device(db);
   assert.deepEqual(await runMigrations(client(db)), []);
   assert.equal((await db.query('SELECT * FROM devices WHERE device_id = $1', [id])).rows.length, 1);
-  assert.equal((await db.query('SELECT * FROM schema_migrations')).rows.length, 1);
+  assert.equal((await db.query('SELECT * FROM schema_migrations')).rows.length, 2);
 });
 
 test('changed or missing applied migration is rejected without changing the database', async (t) => {
@@ -81,19 +81,19 @@ test('changed or missing applied migration is rejected without changing the data
   await runMigrations(client(db), migrations);
   await assert.rejects(runMigrations(client(db), [migration('001_initial_schema.sql', 'SELECT 1')]), /history differs/);
   await assert.rejects(runMigrations(client(db), []), /history differs/);
-  assert.equal((await db.query('SELECT * FROM schema_migrations')).rows.length, 1);
+  assert.equal((await db.query('SELECT * FROM schema_migrations')).rows.length, 2);
 });
 
 test('failure rolls back all pending migrations and journal entries in the batch', async (t) => {
   const db = new PGlite(); t.after(() => db.close());
   const base = await loadMigrations();
   await runMigrations(client(db), base);
-  const next = migration('002_example.sql', 'CREATE TABLE migration_probe (id integer)');
-  const broken = migration('003_broken.sql', 'INSERT INTO missing_table VALUES (1)');
+  const next = migration('003_example.sql', 'CREATE TABLE migration_probe (id integer)');
+  const broken = migration('004_broken.sql', 'INSERT INTO missing_table VALUES (1)');
   await assert.rejects(runMigrations(client(db), [...base, next, broken]), /missing_table/);
   assert.equal((await db.query<{ name: string | null }>("SELECT to_regclass('migration_probe') AS name")).rows[0]?.name, null);
-  assert.equal((await db.query('SELECT * FROM schema_migrations')).rows.length, 1);
-  assert.deepEqual(await runMigrations(client(db), [...base, next]), ['002_example.sql']);
+  assert.equal((await db.query('SELECT * FROM schema_migrations')).rows.length, 2);
+  assert.deepEqual(await runMigrations(client(db), [...base, next]), ['003_example.sql']);
 });
 
 test('migration loader normalizes Windows line endings and rejects duplicate versions', async (t) => {
@@ -115,6 +115,83 @@ test('migration loader refuses an empty directory and an unversioned SQL file', 
   await assert.rejects(loadMigrations(url), /No SQL migrations/);
   await writeFile(join(directory, 'initial.sql'), 'SELECT 1;');
   await assert.rejects(loadMigrations(url), /Invalid migration filename/);
+});
+
+test('device credentials store only hashes and enforce a one-way lifecycle', async (t) => {
+  const db = new PGlite(); t.after(() => db.close()); await runMigrations(client(db));
+  const deviceId = await device(db);
+  const credentialId = randomUUID();
+  const firstHash = '11'.repeat(32);
+  const secondHash = '22'.repeat(32);
+  const createdAt = '2026-10-25T12:00:00Z';
+
+  await db.query(`INSERT INTO device_credentials(
+      credential_id, device_id, token_hash, token_hint, created_at
+    ) VALUES ($1, $2, decode($3, 'hex'), $4, $5)`,
+  [credentialId, deviceId, firstHash, firstHash.slice(0, 12), createdAt]);
+
+  const columns = await db.query<{ column_name: string }>(`SELECT column_name
+    FROM information_schema.columns
+    WHERE table_schema = 'public' AND table_name = 'device_credentials'
+    ORDER BY ordinal_position`);
+  assert.deepEqual(columns.rows.map(({ column_name }) => column_name), [
+    'credential_id', 'device_id', 'token_hash', 'token_hint', 'created_at', 'last_used_at', 'revoked_at',
+  ]);
+  const stored = await db.query<{ token_hash: string; hash_length: number; token_hint: string }>(`SELECT
+      encode(token_hash, 'hex') AS token_hash,
+      octet_length(token_hash) AS hash_length,
+      token_hint
+    FROM device_credentials
+    WHERE credential_id = $1`, [credentialId]);
+  assert.deepEqual(stored.rows[0], {
+    token_hash: firstHash,
+    hash_length: 32,
+    token_hint: firstHash.slice(0, 12),
+  });
+
+  await assert.rejects(db.query(`INSERT INTO device_credentials(
+      credential_id, device_id, token_hash, token_hint
+    ) VALUES ($1, $2, decode($3, 'hex'), $4)`,
+  [randomUUID(), deviceId, secondHash, secondHash.slice(0, 12)]), /unique/);
+  await assert.rejects(db.query(`INSERT INTO device_credentials(
+      credential_id, device_id, token_hash, token_hint
+    ) VALUES ($1, $2, decode('aa', 'hex'), 'aa')`,
+  [randomUUID(), await device(db)]), /token_hash_length/);
+  await assert.rejects(db.query(`UPDATE device_credentials
+    SET token_hash = decode($2, 'hex'), token_hint = $3
+    WHERE credential_id = $1`, [credentialId, secondHash, secondHash.slice(0, 12)]), /cannot be changed/);
+
+  await db.query(`UPDATE device_credentials SET last_used_at = '2026-10-25T12:01:00Z'
+    WHERE credential_id = $1`, [credentialId]);
+  await assert.rejects(db.query(`UPDATE device_credentials SET last_used_at = '2026-10-25T12:00:30Z'
+    WHERE credential_id = $1`, [credentialId]), /cannot move backwards/);
+  await db.query(`UPDATE device_credentials SET revoked_at = '2026-10-25T12:02:00Z'
+    WHERE credential_id = $1`, [credentialId]);
+  await assert.rejects(db.query('UPDATE device_credentials SET revoked_at = NULL WHERE credential_id = $1',
+    [credentialId]), /cannot be restored/);
+  await assert.rejects(db.query(`UPDATE device_credentials SET last_used_at = '2026-10-25T12:01:30Z'
+    WHERE credential_id = $1`, [credentialId]), /cannot be used/);
+
+  const activeCredentialId = randomUUID();
+  await db.query(`INSERT INTO device_credentials(
+      credential_id, device_id, token_hash, token_hint, created_at
+    ) VALUES ($1, $2, decode($3, 'hex'), $4, $5)`,
+  [activeCredentialId, deviceId, secondHash, secondHash.slice(0, 12), '2026-10-25T12:03:00Z']);
+  const credentials = await db.query<{ credential_id: string; revoked_at: Date | null }>(`SELECT
+      credential_id, revoked_at
+    FROM device_credentials
+    WHERE device_id = $1
+    ORDER BY created_at`, [deviceId]);
+  assert.equal(credentials.rows.length, 2);
+  assert.equal(credentials.rows[0]?.credential_id, credentialId);
+  assert.ok(credentials.rows[0]?.revoked_at);
+  assert.deepEqual(credentials.rows[1], { credential_id: activeCredentialId, revoked_at: null });
+
+  const anotherDeviceId = await device(db);
+  await assert.rejects(db.query(`INSERT INTO device_credentials(
+      credential_id, device_id, token_hash, token_hint
+    ) VALUES ($1, $2, decode($3, 'hex'), $4)`,
+  [randomUUID(), anotherDeviceId, secondHash, secondHash.slice(0, 12)]), /unique/);
 });
 
 test('schedules reject invalid days, nonpositive portions, NaN, and duplicate revisions', async (t) => {
