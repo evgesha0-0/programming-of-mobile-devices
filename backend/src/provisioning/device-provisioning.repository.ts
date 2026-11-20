@@ -58,7 +58,7 @@ export function createDeviceProvisioningRepository(
 
         await client.query(
           `UPDATE device_credentials
-           SET revoked_at = now()
+           SET revoked_at = clock_timestamp()
            WHERE device_id = $1 AND revoked_at IS NULL`,
           [deviceId],
         );
@@ -73,7 +73,7 @@ export function createDeviceProvisioningRepository(
 
         const result = await client.query<CredentialRow>(
           `UPDATE device_credentials
-           SET revoked_at = now()
+           SET revoked_at = clock_timestamp()
            WHERE device_id = $1 AND revoked_at IS NULL
            RETURNING credential_id`,
           [deviceId],

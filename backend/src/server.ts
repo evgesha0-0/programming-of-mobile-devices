@@ -1,4 +1,6 @@
 import { buildApp } from './app.js';
+import { createDeviceAuthenticationRepository } from './authentication/device-authentication.repository.js';
+import { createDeviceAuthenticator } from './authentication/device-authentication.service.js';
 import { createCommandRepository } from './commands/command.repository.js';
 import { loadEnv } from './config/env.js';
 import {
@@ -16,6 +18,7 @@ async function start(): Promise<void> {
   const app = await buildApp({
     checkDatabase: () => checkDatabaseConnection(pool),
     commandRepository: createCommandRepository(pool),
+    deviceAuthenticator: createDeviceAuthenticator(createDeviceAuthenticationRepository(pool)),
     deviceRepository: createDeviceRepository(pool),
     deviceOfflineAfterMs: env.deviceOfflineAfterSeconds * 1_000,
     feedingRepository: createFeedingRepository(pool),

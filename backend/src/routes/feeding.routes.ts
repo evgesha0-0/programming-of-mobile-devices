@@ -1,5 +1,7 @@
 import type { FastifyPluginAsync } from 'fastify';
 
+import { getDeviceIdentity, setDeviceIdentity } from '../authentication/device-identity.js';
+import type { DeviceAuthenticator } from '../authentication/device-authentication.service.js';
 import type {
   FeedingService,
   ScheduledFeedingInput,
@@ -200,7 +202,10 @@ const eventResponseSchema = {
   },
 } as const;
 
-export function createFeedingRoutes(feedingService: FeedingService): FastifyPluginAsync {
+export function createFeedingRoutes(
+  feedingService: FeedingService,
+  deviceAuthenticator: DeviceAuthenticator,
+): FastifyPluginAsync {
   return async (fastify): Promise<void> => {
     fastify.get<{ Params: DeviceParams; Querystring: FeedingHistoryQuery }>(
       '/api/v1/devices/:device_id/feedings',
@@ -235,6 +240,13 @@ export function createFeedingRoutes(feedingService: FeedingService): FastifyPlug
     fastify.post<{ Params: DeviceParams; Body: ScheduledFeedingInput }>(
       '/api/v1/devices/:device_id/feeding-events',
       {
+        onRequest: async (request) => setDeviceIdentity(
+          request,
+          await deviceAuthenticator.authenticate(
+            request.headers.authorization,
+            request.params.device_id,
+          ),
+        ),
         schema: {
           params: deviceParamsSchema,
           body: eventBodySchema,
@@ -246,7 +258,7 @@ export function createFeedingRoutes(feedingService: FeedingService): FastifyPlug
       },
       async (request, reply) => {
         const result = await feedingService.createScheduledEvent(
-          request.params.device_id,
+          getDeviceIdentity(request).deviceId,
           request.body,
         );
         return reply

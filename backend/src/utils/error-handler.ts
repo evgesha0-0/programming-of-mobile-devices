@@ -24,6 +24,7 @@ export function errorHandler(
 
   if (error instanceof HttpError) {
     request.log.warn({ err: error }, 'Request rejected');
+    if (error.statusCode === 401) reply.header('WWW-Authenticate', 'Bearer');
     return reply.code(error.statusCode).send(
       createErrorResponse(error.code, error.message, request.id),
     );

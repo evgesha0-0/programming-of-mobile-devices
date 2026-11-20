@@ -1,5 +1,7 @@
 import type { FastifyPluginAsync } from 'fastify';
 
+import { getDeviceIdentity, setDeviceIdentity } from '../authentication/device-identity.js';
+import type { DeviceAuthenticator } from '../authentication/device-authentication.service.js';
 import { daysOfWeek } from '../schedules/schedule.types.js';
 import type { ScheduleInput, ScheduleService } from '../schedules/schedule.service.js';
 
@@ -166,7 +168,10 @@ const syncResponseSchema = {
   },
 } as const;
 
-export function createScheduleRoutes(scheduleService: ScheduleService): FastifyPluginAsync {
+export function createScheduleRoutes(
+  scheduleService: ScheduleService,
+  deviceAuthenticator: DeviceAuthenticator,
+): FastifyPluginAsync {
   return async (fastify): Promise<void> => {
     fastify.get<{ Params: DeviceParams }>(
       '/api/v1/devices/:device_id/schedules',
@@ -177,6 +182,13 @@ export function createScheduleRoutes(scheduleService: ScheduleService): FastifyP
     fastify.get<{ Params: DeviceParams; Querystring: SyncQuery }>(
       '/api/v1/devices/:device_id/sync/schedules',
       {
+        onRequest: async (request) => setDeviceIdentity(
+          request,
+          await deviceAuthenticator.authenticate(
+            request.headers.authorization,
+            request.params.device_id,
+          ),
+        ),
         schema: {
           params: deviceParamsSchema,
           querystring: syncQuerySchema,
@@ -184,7 +196,7 @@ export function createScheduleRoutes(scheduleService: ScheduleService): FastifyP
         },
       },
       async (request) => scheduleService.sync(
-        request.params.device_id,
+        getDeviceIdentity(request).deviceId,
         request.query.known_revision,
       ),
     );

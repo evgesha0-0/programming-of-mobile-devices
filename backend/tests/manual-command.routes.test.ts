@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { buildApp } from '../src/app.js';
+import { trustedDeviceAuthenticator } from './support/device-authenticator.js';
 import type { CommandRepository } from '../src/commands/command.repository.js';
 import type {
   ManualCommandRecord,
@@ -189,6 +190,7 @@ async function appWith(commandRepository = memoryRepository()) {
   return buildApp({
     checkDatabase: async () => undefined,
     commandRepository,
+    deviceAuthenticator: trustedDeviceAuthenticator,
     deviceRepository: unusedDeviceRepository,
     feedingRepository: unusedFeedingRepository,
     scheduleRepository: unusedScheduleRepository,

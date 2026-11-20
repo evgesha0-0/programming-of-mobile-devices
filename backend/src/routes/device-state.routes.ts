@@ -1,5 +1,7 @@
 import type { FastifyPluginAsync } from 'fastify';
 
+import { getDeviceIdentity, setDeviceIdentity } from '../authentication/device-identity.js';
+import type { DeviceAuthenticator } from '../authentication/device-authentication.service.js';
 import { reportedDeviceStatuses } from '../devices/device.types.js';
 import type {
   DeviceService,
@@ -72,7 +74,10 @@ const reportStateResponseSchema = {
   },
 } as const;
 
-export function createDeviceStateRoutes(deviceService: DeviceService): FastifyPluginAsync {
+export function createDeviceStateRoutes(
+  deviceService: DeviceService,
+  deviceAuthenticator: DeviceAuthenticator,
+): FastifyPluginAsync {
   return async (fastify): Promise<void> => {
     fastify.get<{ Params: DeviceParams }>(
       '/api/v1/devices/:device_id/state',
@@ -88,13 +93,23 @@ export function createDeviceStateRoutes(deviceService: DeviceService): FastifyPl
     fastify.put<{ Params: DeviceParams; Body: ReportDeviceStateInput }>(
       '/api/v1/devices/:device_id/state',
       {
+        onRequest: async (request) => setDeviceIdentity(
+          request,
+          await deviceAuthenticator.authenticate(
+            request.headers.authorization,
+            request.params.device_id,
+          ),
+        ),
         schema: {
           params: deviceParamsSchema,
           body: reportStateBodySchema,
           response: { 200: reportStateResponseSchema },
         },
       },
-      async (request) => deviceService.reportState(request.params.device_id, request.body),
+      async (request) => deviceService.reportState(
+        getDeviceIdentity(request).deviceId,
+        request.body,
+      ),
     );
   };
 }

@@ -1,5 +1,7 @@
 import type { FastifyPluginAsync } from 'fastify';
 
+import { getDeviceIdentity, setDeviceIdentity } from '../authentication/device-identity.js';
+import type { DeviceAuthenticator } from '../authentication/device-authentication.service.js';
 import type {
   AcknowledgeCommandInput,
   CommandService,
@@ -249,11 +251,21 @@ const manualResultResponseSchema = {
   },
 } as const;
 
-export function createCommandRoutes(commandService: CommandService): FastifyPluginAsync {
+export function createCommandRoutes(
+  commandService: CommandService,
+  deviceAuthenticator: DeviceAuthenticator,
+): FastifyPluginAsync {
   return async (fastify): Promise<void> => {
     fastify.get<{ Params: DeviceParams; Querystring: PendingCommandQuery }>(
       '/api/v1/devices/:device_id/commands/pending',
       {
+        onRequest: async (request) => setDeviceIdentity(
+          request,
+          await deviceAuthenticator.authenticate(
+            request.headers.authorization,
+            request.params.device_id,
+          ),
+        ),
         schema: {
           params: deviceParamsSchema,
           querystring: pendingCommandQuerySchema,
@@ -261,7 +273,7 @@ export function createCommandRoutes(commandService: CommandService): FastifyPlug
         },
       },
       async (request) => commandService.listPending(
-        request.params.device_id,
+        getDeviceIdentity(request).deviceId,
         request.query.limit ?? 10,
       ),
     );
@@ -269,6 +281,13 @@ export function createCommandRoutes(commandService: CommandService): FastifyPlug
     fastify.post<{ Params: CommandParams; Body: AcknowledgeCommandInput }>(
       '/api/v1/devices/:device_id/commands/:command_id/ack',
       {
+        onRequest: async (request) => setDeviceIdentity(
+          request,
+          await deviceAuthenticator.authenticate(
+            request.headers.authorization,
+            request.params.device_id,
+          ),
+        ),
         schema: {
           params: commandParamsSchema,
           body: acknowledgeCommandBodySchema,
@@ -276,7 +295,7 @@ export function createCommandRoutes(commandService: CommandService): FastifyPlug
         },
       },
       async (request) => commandService.acknowledge(
-        request.params.device_id,
+        getDeviceIdentity(request).deviceId,
         request.params.command_id,
         request.body,
       ),
@@ -285,6 +304,13 @@ export function createCommandRoutes(commandService: CommandService): FastifyPlug
     fastify.post<{ Params: FeedingParams; Body: ManualFeedingResultInput }>(
       '/api/v1/devices/:device_id/feedings/:feeding_id/result',
       {
+        onRequest: async (request) => setDeviceIdentity(
+          request,
+          await deviceAuthenticator.authenticate(
+            request.headers.authorization,
+            request.params.device_id,
+          ),
+        ),
         schema: {
           params: feedingParamsSchema,
           body: manualResultBodySchema,
@@ -292,7 +318,7 @@ export function createCommandRoutes(commandService: CommandService): FastifyPlug
         },
       },
       async (request) => commandService.submitResult(
-        request.params.device_id,
+        getDeviceIdentity(request).deviceId,
         request.params.feeding_id,
         request.body,
       ),

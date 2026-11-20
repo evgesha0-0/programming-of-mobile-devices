@@ -8,6 +8,7 @@ import test from 'node:test';
 import { PGlite } from '@electric-sql/pglite';
 
 import { createCommandRepository, type CommandDatabase } from '../src/commands/command.repository.js';
+import { createDeviceAuthenticationRepository } from '../src/authentication/device-authentication.repository.js';
 import { loadMigrations, runMigrations, type Migration, type MigrationConnection } from '../src/db/migrations.js';
 import { createDeviceRepository, type QueryExecutor } from '../src/devices/device.repository.js';
 import { createFeedingRepository, type FeedingDatabase } from '../src/feedings/feeding.repository.js';
@@ -253,6 +254,39 @@ test('device provisioning creates, rotates, and revokes credentials transactiona
     },
   }), /unique/);
   assert.equal((await db.query('SELECT * FROM devices WHERE device_id = $1', [rolledBackDeviceId])).rows.length, 0);
+});
+
+test('device authentication resolves only active hashes and records successful use', async (t) => {
+  const db = new PGlite(); t.after(() => db.close()); await runMigrations(client(db));
+  const provisioning = createDeviceProvisioningRepository(transactionalDatabase(db));
+  const authentication = createDeviceAuthenticationRepository(transactionalDatabase(db));
+  const deviceId = randomUUID();
+  const credentialId = randomUUID();
+  const tokenHash = Buffer.from('77'.repeat(32), 'hex');
+
+  await provisioning.createDevice({
+    deviceId,
+    name: 'Кормушка',
+    credential: {
+      credentialId,
+      tokenHash,
+      tokenHint: tokenHash.subarray(0, 6).toString('hex'),
+    },
+  });
+  assert.deepEqual(await authentication.findActiveByTokenHash(tokenHash), {
+    credentialId,
+    deviceId,
+  });
+  assert.equal(await authentication.markUsedIfActive(credentialId), true);
+  const used = await db.query<{ last_used_at: Date | null }>(
+    'SELECT last_used_at FROM device_credentials WHERE credential_id = $1',
+    [credentialId],
+  );
+  assert.ok(used.rows[0]?.last_used_at);
+
+  assert.equal(await provisioning.revokeCredential(deviceId), 'revoked');
+  assert.equal(await authentication.findActiveByTokenHash(tokenHash), null);
+  assert.equal(await authentication.markUsedIfActive(credentialId), false);
 });
 
 test('schedules reject invalid days, nonpositive portions, NaN, and duplicate revisions', async (t) => {

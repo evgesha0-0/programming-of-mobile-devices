@@ -21,3 +21,15 @@ export class ConflictError extends HttpError {
   }
 }
 
+export class UnauthorizedError extends HttpError {
+  constructor(message: string) {
+    super(401, 'UNAUTHORIZED', message);
+  }
+}
+
+export class ForbiddenError extends HttpError {
+  constructor(message: string) {
+    super(403, 'FORBIDDEN', message);
+  }
+}
+
