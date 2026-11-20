@@ -11,6 +11,7 @@ import { createCommandRepository, type CommandDatabase } from '../src/commands/c
 import { loadMigrations, runMigrations, type Migration, type MigrationConnection } from '../src/db/migrations.js';
 import { createDeviceRepository, type QueryExecutor } from '../src/devices/device.repository.js';
 import { createFeedingRepository, type FeedingDatabase } from '../src/feedings/feeding.repository.js';
+import { createDeviceProvisioningRepository } from '../src/provisioning/device-provisioning.repository.js';
 import { createScheduleRepository, type TransactionClient, type TransactionPool } from '../src/schedules/schedule.repository.js';
 
 function client(db: PGlite): MigrationConnection {
@@ -192,6 +193,66 @@ test('device credentials store only hashes and enforce a one-way lifecycle', asy
       credential_id, device_id, token_hash, token_hint
     ) VALUES ($1, $2, decode($3, 'hex'), $4)`,
   [randomUUID(), anotherDeviceId, secondHash, secondHash.slice(0, 12)]), /unique/);
+});
+
+test('device provisioning creates, rotates, and revokes credentials transactionally', async (t) => {
+  const db = new PGlite(); t.after(() => db.close()); await runMigrations(client(db));
+  const provisioning = createDeviceProvisioningRepository(transactionalDatabase(db));
+  const deviceId = randomUUID();
+  const firstCredentialId = randomUUID();
+  const firstHash = Buffer.from('33'.repeat(32), 'hex');
+
+  await provisioning.createDevice({
+    deviceId,
+    name: 'Кормушка',
+    credential: {
+      credentialId: firstCredentialId,
+      tokenHash: firstHash,
+      tokenHint: firstHash.subarray(0, 6).toString('hex'),
+    },
+  });
+  assert.equal((await db.query('SELECT * FROM devices WHERE device_id = $1', [deviceId])).rows.length, 1);
+  assert.equal((await db.query(
+    'SELECT * FROM device_credentials WHERE device_id = $1 AND revoked_at IS NULL',
+    [deviceId],
+  )).rows.length, 1);
+
+  const secondCredentialId = randomUUID();
+  const secondHash = Buffer.from('44'.repeat(32), 'hex');
+  assert.equal(await provisioning.rotateCredential(deviceId, {
+    credentialId: secondCredentialId,
+    tokenHash: secondHash,
+    tokenHint: secondHash.subarray(0, 6).toString('hex'),
+  }), true);
+  const history = await db.query<{ credential_id: string; revoked_at: Date | null }>(`SELECT
+      credential_id, revoked_at
+    FROM device_credentials
+    WHERE device_id = $1
+    ORDER BY created_at, credential_id`, [deviceId]);
+  assert.equal(history.rows.length, 2);
+  assert.ok(history.rows.find(({ credential_id }) => credential_id === firstCredentialId)?.revoked_at);
+  assert.equal(history.rows.find(({ credential_id }) => credential_id === secondCredentialId)?.revoked_at, null);
+
+  assert.equal(await provisioning.revokeCredential(deviceId), 'revoked');
+  assert.equal(await provisioning.revokeCredential(deviceId), 'already_revoked');
+  assert.equal(await provisioning.rotateCredential(randomUUID(), {
+    credentialId: randomUUID(),
+    tokenHash: Buffer.from('55'.repeat(32), 'hex'),
+    tokenHint: '555555555555',
+  }), false);
+
+  const rolledBackDeviceId = randomUUID();
+  const rollbackHash = Buffer.from('66'.repeat(32), 'hex');
+  await assert.rejects(provisioning.createDevice({
+    deviceId: rolledBackDeviceId,
+    name: 'Не должна сохраниться',
+    credential: {
+      credentialId: firstCredentialId,
+      tokenHash: rollbackHash,
+      tokenHint: rollbackHash.subarray(0, 6).toString('hex'),
+    },
+  }), /unique/);
+  assert.equal((await db.query('SELECT * FROM devices WHERE device_id = $1', [rolledBackDeviceId])).rows.length, 0);
 });
 
 test('schedules reject invalid days, nonpositive portions, NaN, and duplicate revisions', async (t) => {

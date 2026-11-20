@@ -14,6 +14,12 @@
     "start": "node dist/server.js",
     "db:migrate": "tsx src/db/migrate.ts",
     "db:migrate:production": "node dist/db/migrate.js",
+    "device:provision": "tsx src/provisioning/device-provisioning.cli.ts provision",
+    "device:provision:production": "node dist/provisioning/device-provisioning.cli.js provision",
+    "device:rotate-token": "tsx src/provisioning/device-provisioning.cli.ts rotate",
+    "device:rotate-token:production": "node dist/provisioning/device-provisioning.cli.js rotate",
+    "device:revoke-token": "tsx src/provisioning/device-provisioning.cli.ts revoke",
+    "device:revoke-token:production": "node dist/provisioning/device-provisioning.cli.js revoke",
     "typecheck": "tsc -p tsconfig.check.json",
     "test": "tsx --test --test-concurrency=1 tests/**/*.test.ts"
   },
