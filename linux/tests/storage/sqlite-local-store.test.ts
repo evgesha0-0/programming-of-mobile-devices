@@ -35,7 +35,7 @@ test('SQLite store applies migrations and enforces a single process lock', (t) =
   const databasePath = temporaryDatabasePath(t);
   const store = SqliteLocalStore.open({ databasePath });
 
-  assert.equal(store.getSchemaVersion(), 1);
+  assert.equal(store.getSchemaVersion(), 2);
   assert.throws(
     () => SqliteLocalStore.open({ databasePath }),
     LocalStoreLockedError,
@@ -43,7 +43,7 @@ test('SQLite store applies migrations and enforces a single process lock', (t) =
 
   store.close();
   const reopened = SqliteLocalStore.open({ databasePath });
-  assert.equal(reopened.getSchemaVersion(), 1);
+  assert.equal(reopened.getSchemaVersion(), 2);
   reopened.close();
 });
 

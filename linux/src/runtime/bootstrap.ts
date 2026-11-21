@@ -4,11 +4,14 @@ import {
   type LoadRuntimeConfigOptions,
   type RuntimeConfig,
 } from '../config/index.js';
+import { DeviceStateReporter } from '../application/index.js';
+import { serviceMetadata } from '../app.js';
 import type { DeviceId } from '../domain/index.js';
 import { createJsonLogger, type JsonLogger } from '../observability/index.js';
 import { HttpBackendGateway } from '../adapters/backend-http/index.js';
 import { SqliteLocalStore } from '../adapters/storage-sqlite/index.js';
-import type { BackendGateway } from '../ports/index.js';
+import { SystemClock } from '../adapters/system-clock/index.js';
+import type { BackendGateway, LocalStore } from '../ports/index.js';
 
 export interface RuntimeResource {
   close(): void;
@@ -24,7 +27,7 @@ export interface NetworkBootstrapConfig {
 }
 
 export interface RuntimeDependencies {
-  readonly openStore: (sqlitePath: string) => RuntimeResource;
+  readonly openStore: (sqlitePath: string) => LocalStore;
   readonly openNetwork: (config: NetworkBootstrapConfig, logger: JsonLogger) => BackendGateway;
 }
 
@@ -38,7 +41,9 @@ export interface BootstrapRuntimeOptions extends LoadRuntimeConfigOptions {
 export interface RunningRuntime extends RuntimeResource {
   readonly config: RuntimeConfig;
   readonly logger: JsonLogger;
+  readonly localStore: LocalStore;
   readonly backendGateway: BackendGateway;
+  readonly deviceStateReporter: DeviceStateReporter;
 }
 
 const defaultDependencies: RuntimeDependencies = Object.freeze({
@@ -69,9 +74,12 @@ export function bootstrapRuntime(options: BootstrapRuntimeOptions = {}): Running
   const resources: RuntimeResource[] = [];
 
   logger.info('runtime_configuration_validated', runtimeConfigSummary(config));
+  let localStore: LocalStore;
   let backendGateway: BackendGateway;
+  let deviceStateReporter: DeviceStateReporter;
   try {
-    resources.push(dependencies.openStore(config.sqlitePath));
+    localStore = dependencies.openStore(config.sqlitePath);
+    resources.push(localStore);
     backendGateway = dependencies.openNetwork({
       backendUrl: config.backendUrl,
       deviceId: config.deviceId,
@@ -81,6 +89,16 @@ export function bootstrapRuntime(options: BootstrapRuntimeOptions = {}): Running
       backoffMaxMs: config.backoff.maxMs,
     }, logger);
     resources.push(backendGateway);
+    deviceStateReporter = new DeviceStateReporter({
+      deviceId: config.deviceId,
+      firmwareVersion: serviceMetadata.version,
+      heartbeatIntervalMs: config.intervals.heartbeatMs,
+      maxClockSkewMs: config.maxClockSkewMs,
+      gateway: backendGateway,
+      store: localStore,
+      clock: new SystemClock(),
+      logger,
+    });
   } catch (error) {
     let cleanupError: unknown;
     try {
@@ -97,7 +115,9 @@ export function bootstrapRuntime(options: BootstrapRuntimeOptions = {}): Running
   return Object.freeze({
     config,
     logger,
+    localStore,
     backendGateway,
+    deviceStateReporter,
     close(): void {
       if (closed) return;
       closed = true;

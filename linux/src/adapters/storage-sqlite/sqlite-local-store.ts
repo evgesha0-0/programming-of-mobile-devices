@@ -5,6 +5,10 @@ import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 
 import {
+  reportDeviceStateRequestSchema,
+  type ReportDeviceStateRequest,
+} from '../../contracts/index.js';
+import {
   actualGramsSchema,
   daysOfWeekSchema,
   feedingIdSchema,
@@ -16,10 +20,13 @@ import {
   type UtcDateTime,
 } from '../../domain/index.js';
 import {
+  HeartbeatPayloadConflictError,
+  NonMonotonicHeartbeatError,
   OutboxConflictError,
   ScheduleOccurrenceConflictError,
   ScheduleRevisionConflictError,
   StaleScheduleRevisionError,
+  type HeartbeatDeliveryReceipt,
   type LocalSchedule,
   type LocalScheduleSnapshot,
   type LocalStore,
@@ -27,6 +34,7 @@ import {
   type OutboxKind,
   type OutboxMessage,
   type ScheduleOccurrenceClaim,
+  type StoredHeartbeat,
 } from '../../ports/index.js';
 import { runMigrations } from './migration-runner.js';
 import { ProcessLock } from './process-lock.js';
@@ -91,6 +99,100 @@ export class SqliteLocalStore implements LocalStore {
       'SELECT COALESCE(MAX(version), 0) AS version FROM schema_migrations',
     ).get();
     return readNumber(row, 'version');
+  }
+
+  getLastHeartbeat(): StoredHeartbeat | null {
+    this.assertOpen();
+    const row = this.database.prepare(`
+      SELECT
+        status,
+        reported_at,
+        firmware_version,
+        error_code,
+        error_message,
+        delivery_state,
+        server_time,
+        clock_offset_ms,
+        request_id
+      FROM device_state
+      WHERE singleton_id = 1
+    `).get();
+    return row ? readHeartbeat(row) : null;
+  }
+
+  savePendingHeartbeat(payload: ReportDeviceStateRequest): void {
+    this.assertOpen();
+    const validated = reportDeviceStateRequestSchema.parse(payload);
+
+    this.transaction(() => {
+      const existing = this.getLastHeartbeat();
+      if (existing) {
+        const existingTime = Date.parse(existing.payload.reported_at);
+        const nextTime = Date.parse(validated.reported_at);
+        if (nextTime < existingTime) throw new NonMonotonicHeartbeatError();
+        if (nextTime === existingTime) {
+          if (!heartbeatPayloadEquals(existing.payload, validated)) {
+            throw new HeartbeatPayloadConflictError();
+          }
+          return;
+        }
+      }
+
+      this.database.prepare(`
+        INSERT INTO device_state(
+          singleton_id,
+          status,
+          reported_at,
+          firmware_version,
+          error_code,
+          error_message,
+          delivery_state,
+          server_time,
+          clock_offset_ms,
+          request_id
+        ) VALUES (1, ?, ?, ?, ?, ?, 'pending', NULL, NULL, NULL)
+        ON CONFLICT(singleton_id) DO UPDATE SET
+          status = excluded.status,
+          reported_at = excluded.reported_at,
+          firmware_version = excluded.firmware_version,
+          error_code = excluded.error_code,
+          error_message = excluded.error_message,
+          delivery_state = 'pending',
+          server_time = NULL,
+          clock_offset_ms = NULL,
+          request_id = NULL
+      `).run(
+        validated.status,
+        validated.reported_at,
+        validated.firmware_version,
+        validated.error_code,
+        validated.error_message,
+      );
+    });
+  }
+
+  markHeartbeatDelivered(receipt: HeartbeatDeliveryReceipt): boolean {
+    this.assertOpen();
+    const reportedAt = utcDateTimeSchema.parse(receipt.reportedAt);
+    const serverTime = utcDateTimeSchema.parse(receipt.serverTime);
+    if (!Number.isSafeInteger(receipt.clockOffsetMs)) {
+      throw new RangeError('clockOffsetMs must be a safe integer');
+    }
+    if (receipt.requestId !== null && receipt.requestId.trim().length === 0) {
+      throw new TypeError('requestId must be null or a nonblank string');
+    }
+
+    const result = this.database.prepare(`
+      UPDATE device_state
+      SET delivery_state = 'delivered',
+          server_time = ?,
+          clock_offset_ms = ?,
+          request_id = ?
+      WHERE singleton_id = 1
+        AND reported_at = ?
+        AND delivery_state = 'pending'
+    `).run(serverTime, receipt.clockOffsetMs, receipt.requestId, reportedAt);
+    return sqliteIntegerToNumber(result.changes, 'changed row count') === 1;
   }
 
   getScheduleSnapshot(): LocalScheduleSnapshot | null {
@@ -403,6 +505,38 @@ function readSchedule(row: Record<string, unknown>): LocalSchedule {
   };
 }
 
+function readHeartbeat(row: Record<string, unknown>): StoredHeartbeat {
+  const serverTime = readNullableString(row, 'server_time');
+  const deliveryState = readString(row, 'delivery_state');
+  if (deliveryState !== 'pending' && deliveryState !== 'delivered') {
+    throw new Error(`Invalid heartbeat delivery state: ${deliveryState}`);
+  }
+  return {
+    payload: reportDeviceStateRequestSchema.parse({
+      status: readString(row, 'status'),
+      reported_at: readString(row, 'reported_at'),
+      firmware_version: readString(row, 'firmware_version'),
+      error_code: readNullableString(row, 'error_code'),
+      error_message: readNullableString(row, 'error_message'),
+    }),
+    deliveryState,
+    serverTime: serverTime === null ? null : utcDateTimeSchema.parse(serverTime),
+    clockOffsetMs: readNullableNumber(row, 'clock_offset_ms'),
+    requestId: readNullableString(row, 'request_id'),
+  };
+}
+
+function heartbeatPayloadEquals(
+  left: ReportDeviceStateRequest,
+  right: ReportDeviceStateRequest,
+): boolean {
+  return left.status === right.status
+    && left.reported_at === right.reported_at
+    && left.firmware_version === right.firmware_version
+    && left.error_code === right.error_code
+    && left.error_message === right.error_message;
+}
+
 function validateOccurrenceClaim(claim: ScheduleOccurrenceClaim): void {
   if (claim.occurrenceKey.trim().length === 0) {
     throw new TypeError('occurrenceKey must not be blank');
@@ -466,6 +600,18 @@ function readNumber(row: Record<string, unknown> | undefined, column: string): n
   const value = row?.[column];
   if (typeof value !== 'number' || !Number.isSafeInteger(value)) {
     throw new Error(`Expected safe integer column ${column}`);
+  }
+  return value;
+}
+
+function readNullableNumber(
+  row: Record<string, unknown> | undefined,
+  column: string,
+): number | null {
+  const value = row?.[column];
+  if (value === null) return null;
+  if (typeof value !== 'number' || !Number.isSafeInteger(value)) {
+    throw new Error(`Expected nullable safe integer column ${column}`);
   }
   return value;
 }

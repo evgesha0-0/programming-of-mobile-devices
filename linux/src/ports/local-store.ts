@@ -4,6 +4,7 @@ import type {
   ScheduleId,
   UtcDateTime,
 } from '../domain/index.js';
+import type { ReportDeviceStateRequest } from '../contracts/index.js';
 
 export interface LocalSchedule {
   scheduleId: ScheduleId;
@@ -46,9 +47,29 @@ export interface OutboxMessage extends NewOutboxMessage {
   lastError: string | null;
 }
 
+export type HeartbeatDeliveryState = 'pending' | 'delivered';
+
+export interface StoredHeartbeat {
+  readonly payload: ReportDeviceStateRequest;
+  readonly deliveryState: HeartbeatDeliveryState;
+  readonly serverTime: UtcDateTime | null;
+  readonly clockOffsetMs: number | null;
+  readonly requestId: string | null;
+}
+
+export interface HeartbeatDeliveryReceipt {
+  readonly reportedAt: UtcDateTime;
+  readonly serverTime: UtcDateTime;
+  readonly clockOffsetMs: number;
+  readonly requestId: string | null;
+}
+
 export interface LocalStore {
   close(): void;
   getSchemaVersion(): number;
+  getLastHeartbeat(): StoredHeartbeat | null;
+  savePendingHeartbeat(payload: ReportDeviceStateRequest): void;
+  markHeartbeatDelivered(receipt: HeartbeatDeliveryReceipt): boolean;
   getScheduleSnapshot(): LocalScheduleSnapshot | null;
   replaceScheduleSnapshot(snapshot: LocalScheduleSnapshot): void;
   claimScheduleOccurrence(claim: ScheduleOccurrenceClaim): boolean;
@@ -56,6 +77,20 @@ export interface LocalStore {
   listPendingOutbox(limit: number, availableAt: UtcDateTime): OutboxMessage[];
   rescheduleOutbox(id: number, nextAttemptAt: UtcDateTime, lastError: string): boolean;
   markOutboxDelivered(id: number, deliveredAt: UtcDateTime): boolean;
+}
+
+export class NonMonotonicHeartbeatError extends Error {
+  constructor() {
+    super('Heartbeat reported_at must be newer than the stored heartbeat');
+    this.name = 'NonMonotonicHeartbeatError';
+  }
+}
+
+export class HeartbeatPayloadConflictError extends Error {
+  constructor() {
+    super('Heartbeat reported_at is already stored with different content');
+    this.name = 'HeartbeatPayloadConflictError';
+  }
 }
 
 export class LocalStoreLockedError extends Error {

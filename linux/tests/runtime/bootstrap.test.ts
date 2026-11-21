@@ -8,6 +8,7 @@ import {
   type RuntimeDependencies,
 } from '../../src/runtime/index.js';
 import type { BackendGateway } from '../../src/ports/index.js';
+import type { LocalStore } from '../../src/ports/index.js';
 
 const deviceToken = `dvc_${'C'.repeat(43)}`;
 
@@ -17,7 +18,7 @@ test('invalid configuration fails before opening storage or network', () => {
   const dependencies: RuntimeDependencies = {
     openStore() {
       storeOpened = true;
-      return { close() {} };
+      return fakeLocalStore(() => {});
     },
     openNetwork() {
       networkOpened = true;
@@ -40,7 +41,7 @@ test('runtime opens resources after validation and closes them in reverse order'
     openStore(sqlitePath) {
       events.push(`store:${sqlitePath}`);
       assert.equal(sqlitePath.includes(deviceToken), false);
-      return { close: () => events.push('store:close') };
+      return fakeLocalStore(() => events.push('store:close'));
     },
     openNetwork(config) {
       events.push('network:open');
@@ -72,7 +73,7 @@ test('runtime closes storage if later network initialization fails', () => {
     dependencies: {
       openStore() {
         events.push('store:open');
-        return { close: () => events.push('store:close') };
+        return fakeLocalStore(() => events.push('store:close'));
       },
       openNetwork() {
         events.push('network:open');
@@ -92,6 +93,10 @@ test('unexpected startup failures do not expose internal error details', () => {
 
 function fakeBackendGateway(close: () => void): BackendGateway {
   return { close } as BackendGateway;
+}
+
+function fakeLocalStore(close: () => void): LocalStore {
+  return { close } as LocalStore;
 }
 
 function validEnvironment(): Record<string, string> {

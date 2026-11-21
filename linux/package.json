@@ -15,7 +15,8 @@
     "typecheck": "tsc -p tsconfig.check.json",
     "test": "tsx --test tests/**/*.test.ts",
     "test:gateway": "tsx --test tests/backend-http/http-backend-gateway.contract.test.ts tests/runtime/bootstrap.test.ts",
-    "test:runtime": "tsx --test tests/config/runtime-config.test.ts tests/observability/json-logger.test.ts tests/runtime/bootstrap.test.ts"
+    "test:runtime": "tsx --test tests/config/runtime-config.test.ts tests/observability/json-logger.test.ts tests/runtime/bootstrap.test.ts",
+    "test:state": "tsx --test tests/application/device-state-reporter.test.ts tests/storage/device-heartbeat.test.ts tests/backend-http/http-backend-gateway.contract.test.ts"
   },
   "devDependencies": {
     "@types/node": "^24.10.0",
