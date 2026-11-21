@@ -10,22 +10,30 @@ import {
 } from '../../contracts/index.js';
 import {
   actualGramsSchema,
+  commandIdSchema,
   daysOfWeekSchema,
+  errorCodeSchema,
+  errorMessageSchema,
   feedingIdSchema,
   localTimeSchema,
   portionGramsSchema,
   scheduleIdSchema,
   timezoneSchema,
   utcDateTimeSchema,
+  type FeedingId,
   type UtcDateTime,
 } from '../../domain/index.js';
 import {
+  FeedingIntentConflictError,
+  FeedingStateConflictError,
   HeartbeatPayloadConflictError,
   NonMonotonicHeartbeatError,
   OutboxConflictError,
   ScheduleOccurrenceConflictError,
   ScheduleRevisionConflictError,
   StaleScheduleRevisionError,
+  type FeedingCompletion,
+  type FeedingIntent,
   type HeartbeatDeliveryReceipt,
   type LocalSchedule,
   type LocalScheduleSnapshot,
@@ -34,6 +42,7 @@ import {
   type OutboxKind,
   type OutboxMessage,
   type ScheduleOccurrenceClaim,
+  type StoredLocalFeeding,
   type StoredHeartbeat,
 } from '../../ports/index.js';
 import { runMigrations } from './migration-runner.js';
@@ -44,6 +53,13 @@ const defaultMigrationsDirectory = resolve(
   '../../../migrations',
 );
 const outboxKinds = new Set<OutboxKind>(['state', 'ack', 'manual_result', 'scheduled_event']);
+const feedingStatuses: ReadonlySet<StoredLocalFeeding['status']> = new Set([
+  'pending',
+  'running',
+  'completed',
+  'failed',
+  'expired',
+]);
 
 export interface SqliteLocalStoreOptions {
   databasePath: string;
@@ -195,6 +211,150 @@ export class SqliteLocalStore implements LocalStore {
     return sqliteIntegerToNumber(result.changes, 'changed row count') === 1;
   }
 
+  getFeeding(feedingId: FeedingId): StoredLocalFeeding | null {
+    this.assertOpen();
+    const validatedFeedingId = feedingIdSchema.parse(feedingId);
+    const row = this.database.prepare(`
+      SELECT
+        feeding_id,
+        source,
+        command_id,
+        schedule_id,
+        portion_grams_cents,
+        actual_grams_cents,
+        status,
+        created_at,
+        started_at,
+        finished_at,
+        error_code,
+        error_message,
+        terminal_payload_json
+      FROM feedings
+      WHERE feeding_id = ?
+    `).get(validatedFeedingId);
+    return row ? readFeeding(row) : null;
+  }
+
+  recordFeedingIntent(intent: FeedingIntent): boolean {
+    this.assertOpen();
+    validateFeedingIntent(intent);
+    return this.transaction(() => {
+      const existing = this.getFeeding(intent.feedingId);
+      if (existing) {
+        if (!feedingIntentEquals(existing, intent)) {
+          throw new FeedingIntentConflictError(intent.feedingId);
+        }
+        return false;
+      }
+      this.database.prepare(`
+        INSERT INTO feedings(
+          feeding_id,
+          source,
+          command_id,
+          schedule_id,
+          portion_grams_cents,
+          status,
+          created_at
+        ) VALUES (?, ?, ?, ?, ?, 'pending', ?)
+      `).run(
+        intent.feedingId,
+        intent.source,
+        intent.commandId,
+        intent.scheduleId,
+        gramsToCents(intent.portionGrams),
+        intent.createdAt,
+      );
+      return true;
+    });
+  }
+
+  markFeedingRunning(
+    feedingId: FeedingId,
+    startedAt: UtcDateTime,
+  ): boolean {
+    this.assertOpen();
+    const validatedFeedingId = feedingIdSchema.parse(feedingId);
+    const validatedStartedAt = utcDateTimeSchema.parse(startedAt);
+    return this.transaction(() => {
+      const existing = this.getFeeding(validatedFeedingId);
+      if (!existing) throw new FeedingStateConflictError(validatedFeedingId);
+      if (existing.status === 'running' && existing.startedAt === validatedStartedAt) return false;
+      if (existing.status !== 'pending') throw new FeedingStateConflictError(validatedFeedingId);
+      if (Date.parse(validatedStartedAt) < Date.parse(existing.createdAt)) {
+        throw new FeedingStateConflictError(validatedFeedingId);
+      }
+      const result = this.database.prepare(`
+        UPDATE feedings
+        SET status = 'running', started_at = ?
+        WHERE feeding_id = ? AND status = 'pending'
+      `).run(validatedStartedAt, validatedFeedingId);
+      if (sqliteIntegerToNumber(result.changes, 'changed row count') !== 1) {
+        throw new FeedingStateConflictError(validatedFeedingId);
+      }
+      return true;
+    });
+  }
+
+  completeFeedingAndEnqueue(
+    completion: FeedingCompletion,
+    outbox: NewOutboxMessage,
+  ): number {
+    this.assertOpen();
+    validateFeedingCompletion(completion);
+    validateOutboxMessage(outbox);
+    if (
+      outbox.aggregateId !== completion.feedingId
+      || outbox.payload !== completion.terminalPayload
+      || outbox.createdAt !== completion.finishedAt
+    ) {
+      throw new TypeError('Terminal outbox must contain the exact feeding payload and timestamp');
+    }
+
+    return this.transaction(() => {
+      const existing = this.getFeeding(completion.feedingId);
+      if (!existing) throw new FeedingStateConflictError(completion.feedingId);
+      const expectedKind: OutboxKind = existing.source === 'manual'
+        ? 'manual_result'
+        : 'scheduled_event';
+      if (outbox.kind !== expectedKind) {
+        throw new TypeError(`Expected ${expectedKind} outbox message`);
+      }
+      if (existing.status === 'completed' || existing.status === 'failed') {
+        if (!feedingCompletionEquals(existing, completion)) {
+          throw new FeedingStateConflictError(completion.feedingId);
+        }
+        return this.enqueueOutboxWithinTransaction(outbox);
+      }
+      if (existing.status !== 'running' || existing.startedAt !== completion.startedAt) {
+        throw new FeedingStateConflictError(completion.feedingId);
+      }
+
+      const result = this.database.prepare(`
+        UPDATE feedings
+        SET status = ?,
+            actual_grams_cents = ?,
+            finished_at = ?,
+            error_code = ?,
+            error_message = ?,
+            terminal_payload_json = ?
+        WHERE feeding_id = ? AND status = 'running' AND started_at = ?
+      `).run(
+        completion.status,
+        completion.actualGrams === null ? null : gramsToCents(completion.actualGrams),
+        completion.finishedAt,
+        completion.errorCode,
+        completion.errorMessage,
+        completion.terminalPayload,
+        completion.feedingId,
+        completion.startedAt,
+      );
+      if (sqliteIntegerToNumber(result.changes, 'changed row count') !== 1) {
+        throw new FeedingStateConflictError(completion.feedingId);
+      }
+      return this.enqueueOutboxWithinTransaction(outbox);
+    });
+  }
+
   getScheduleSnapshot(): LocalScheduleSnapshot | null {
     this.assertOpen();
     const revisionValue = this.getMetadata('schedule_revision');
@@ -333,35 +493,7 @@ export class SqliteLocalStore implements LocalStore {
     this.assertOpen();
     validateOutboxMessage(message);
 
-    return this.transaction(() => {
-      const existing = this.database.prepare(`
-        SELECT id, payload_json, created_at
-        FROM outbox
-        WHERE kind = ? AND aggregate_id = ?
-      `).get(message.kind, message.aggregateId);
-      if (existing) {
-        if (
-          readString(existing, 'payload_json') !== message.payload
-          || readString(existing, 'created_at') !== message.createdAt
-        ) {
-          throw new OutboxConflictError(message.kind, message.aggregateId);
-        }
-        return readNumber(existing, 'id');
-      }
-
-      const result = this.database.prepare(`
-        INSERT INTO outbox(
-          kind, aggregate_id, payload_json, next_attempt_at, created_at
-        ) VALUES (?, ?, ?, ?, ?)
-      `).run(
-        message.kind,
-        message.aggregateId,
-        message.payload,
-        message.nextAttemptAt,
-        message.createdAt,
-      );
-      return sqliteIntegerToNumber(result.lastInsertRowid, 'outbox id');
-    });
+    return this.transaction(() => this.enqueueOutboxWithinTransaction(message));
   }
 
   listPendingOutbox(limit: number, availableAt: UtcDateTime): OutboxMessage[] {
@@ -430,6 +562,36 @@ export class SqliteLocalStore implements LocalStore {
       this.database.exec('ROLLBACK');
       throw error;
     }
+  }
+
+  private enqueueOutboxWithinTransaction(message: NewOutboxMessage): number {
+    const existing = this.database.prepare(`
+      SELECT id, payload_json, created_at
+      FROM outbox
+      WHERE kind = ? AND aggregate_id = ?
+    `).get(message.kind, message.aggregateId);
+    if (existing) {
+      if (
+        readString(existing, 'payload_json') !== message.payload
+        || readString(existing, 'created_at') !== message.createdAt
+      ) {
+        throw new OutboxConflictError(message.kind, message.aggregateId);
+      }
+      return readNumber(existing, 'id');
+    }
+
+    const result = this.database.prepare(`
+      INSERT INTO outbox(
+        kind, aggregate_id, payload_json, next_attempt_at, created_at
+      ) VALUES (?, ?, ?, ?, ?)
+    `).run(
+      message.kind,
+      message.aggregateId,
+      message.payload,
+      message.nextAttemptAt,
+      message.createdAt,
+    );
+    return sqliteIntegerToNumber(result.lastInsertRowid, 'outbox id');
   }
 
   private getMetadata(key: string): string | undefined {
@@ -535,6 +697,118 @@ function heartbeatPayloadEquals(
     && left.firmware_version === right.firmware_version
     && left.error_code === right.error_code
     && left.error_message === right.error_message;
+}
+
+function validateFeedingIntent(intent: FeedingIntent): void {
+  feedingIdSchema.parse(intent.feedingId);
+  portionGramsSchema.parse(intent.portionGrams);
+  utcDateTimeSchema.parse(intent.createdAt);
+  if (intent.source === 'manual') {
+    commandIdSchema.parse(intent.commandId);
+    if (intent.scheduleId !== null) throw new TypeError('Manual feeding cannot reference scheduleId');
+  } else {
+    scheduleIdSchema.parse(intent.scheduleId);
+    if (intent.commandId !== null) throw new TypeError('Scheduled feeding cannot reference commandId');
+  }
+}
+
+function validateFeedingCompletion(completion: FeedingCompletion): void {
+  feedingIdSchema.parse(completion.feedingId);
+  utcDateTimeSchema.parse(completion.startedAt);
+  utcDateTimeSchema.parse(completion.finishedAt);
+  if (Date.parse(completion.finishedAt) < Date.parse(completion.startedAt)) {
+    throw new TypeError('Feeding finishedAt must not precede startedAt');
+  }
+  const payload: unknown = JSON.parse(completion.terminalPayload);
+  if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) {
+    throw new TypeError('Terminal payload must be a JSON object');
+  }
+  if (completion.status === 'completed') {
+    actualGramsSchema.parse(completion.actualGrams);
+    if (completion.errorCode !== null || completion.errorMessage !== null) {
+      throw new TypeError('Completed feeding cannot contain error details');
+    }
+  } else {
+    if (completion.actualGrams !== null) actualGramsSchema.parse(completion.actualGrams);
+    errorCodeSchema.parse(completion.errorCode);
+    errorMessageSchema.parse(completion.errorMessage);
+  }
+}
+
+function readFeeding(row: Record<string, unknown>): StoredLocalFeeding {
+  const source = readString(row, 'source');
+  const status = readString(row, 'status');
+  if (source !== 'manual' && source !== 'scheduled') {
+    throw new Error(`Invalid feeding source: ${source}`);
+  }
+  if (!feedingStatuses.has(status as StoredLocalFeeding['status'])) {
+    throw new Error(`Invalid feeding status: ${status}`);
+  }
+  const actualCents = readNullableNumber(row, 'actual_grams_cents');
+  const common = {
+    feedingId: feedingIdSchema.parse(readString(row, 'feeding_id')),
+    portionGrams: portionGramsSchema.parse(readNumber(row, 'portion_grams_cents') / 100),
+    createdAt: utcDateTimeSchema.parse(readString(row, 'created_at')),
+    status: status as StoredLocalFeeding['status'],
+    actualGrams: actualCents === null ? null : actualGramsSchema.parse(actualCents / 100),
+    startedAt: parseNullableUtc(row, 'started_at'),
+    finishedAt: parseNullableUtc(row, 'finished_at'),
+    errorCode: parseNullableErrorCode(row, 'error_code'),
+    errorMessage: parseNullableErrorMessage(row, 'error_message'),
+    terminalPayload: readNullableString(row, 'terminal_payload_json'),
+  };
+  if (source === 'manual') {
+    return {
+      ...common,
+      source,
+      commandId: commandIdSchema.parse(readString(row, 'command_id')),
+      scheduleId: null,
+    };
+  }
+  return {
+    ...common,
+    source,
+    commandId: null,
+    scheduleId: scheduleIdSchema.parse(readString(row, 'schedule_id')),
+  };
+}
+
+function feedingIntentEquals(existing: StoredLocalFeeding, intent: FeedingIntent): boolean {
+  return existing.feedingId === intent.feedingId
+    && existing.source === intent.source
+    && existing.commandId === intent.commandId
+    && existing.scheduleId === intent.scheduleId
+    && existing.portionGrams === intent.portionGrams
+    && existing.createdAt === intent.createdAt;
+}
+
+function feedingCompletionEquals(
+  existing: StoredLocalFeeding,
+  completion: FeedingCompletion,
+): boolean {
+  return existing.feedingId === completion.feedingId
+    && existing.status === completion.status
+    && existing.actualGrams === completion.actualGrams
+    && existing.startedAt === completion.startedAt
+    && existing.finishedAt === completion.finishedAt
+    && existing.errorCode === completion.errorCode
+    && existing.errorMessage === completion.errorMessage
+    && existing.terminalPayload === completion.terminalPayload;
+}
+
+function parseNullableUtc(row: Record<string, unknown>, column: string): UtcDateTime | null {
+  const value = readNullableString(row, column);
+  return value === null ? null : utcDateTimeSchema.parse(value);
+}
+
+function parseNullableErrorCode(row: Record<string, unknown>, column: string): string | null {
+  const value = readNullableString(row, column);
+  return value === null ? null : errorCodeSchema.parse(value);
+}
+
+function parseNullableErrorMessage(row: Record<string, unknown>, column: string): string | null {
+  const value = readNullableString(row, column);
+  return value === null ? null : errorMessageSchema.parse(value);
 }
 
 function validateOccurrenceClaim(claim: ScheduleOccurrenceClaim): void {

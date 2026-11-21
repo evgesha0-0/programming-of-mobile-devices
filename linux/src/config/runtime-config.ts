@@ -28,6 +28,7 @@ const environmentSchema = z.object({
   BACKOFF_INITIAL_MS: integerEnvironmentValue(1_000, 100, 60_000),
   BACKOFF_MAX_MS: integerEnvironmentValue(60_000, 100, 600_000),
   MAX_CLOCK_SKEW_MS: integerEnvironmentValue(30_000, 0, 300_000),
+  FEEDING_TIMEOUT_MS: integerEnvironmentValue(30_000, 1_000, 300_000),
   SIMULATOR_SEED: z.string().min(1).max(128).default('smart-cat-feeder'),
   SIMULATOR_SCENARIO: z.enum([
     'normal',
@@ -79,6 +80,7 @@ export interface RuntimeConfig {
     maxMs: number;
   }>;
   readonly maxClockSkewMs: number;
+  readonly feedingTimeoutMs: number;
   readonly simulator: Readonly<{
     seed: string;
     scenario: SimulatorScenarioName;
@@ -97,6 +99,7 @@ export interface RuntimeConfigSummary {
   readonly requestTimeoutMs: number;
   readonly backoff: RuntimeConfig['backoff'];
   readonly maxClockSkewMs: number;
+  readonly feedingTimeoutMs: number;
   readonly simulator: RuntimeConfig['simulator'];
 }
 
@@ -152,6 +155,7 @@ export function loadRuntimeConfig(
       maxMs: environment.BACKOFF_MAX_MS,
     }),
     maxClockSkewMs: environment.MAX_CLOCK_SKEW_MS,
+    feedingTimeoutMs: environment.FEEDING_TIMEOUT_MS,
     simulator: Object.freeze({
       seed: environment.SIMULATOR_SEED,
       scenario: environment.SIMULATOR_SCENARIO,
@@ -172,6 +176,7 @@ export function runtimeConfigSummary(config: RuntimeConfig): RuntimeConfigSummar
     requestTimeoutMs: config.requestTimeoutMs,
     backoff: config.backoff,
     maxClockSkewMs: config.maxClockSkewMs,
+    feedingTimeoutMs: config.feedingTimeoutMs,
     simulator: config.simulator,
   });
 }

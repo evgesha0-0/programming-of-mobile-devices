@@ -4,7 +4,11 @@ import {
   type LoadRuntimeConfigOptions,
   type RuntimeConfig,
 } from '../config/index.js';
-import { DeviceStateReporter, ScheduleSyncService } from '../application/index.js';
+import {
+  DeviceStateReporter,
+  FeedingOrchestrator,
+  ScheduleSyncService,
+} from '../application/index.js';
 import { serviceMetadata } from '../app.js';
 import type { DeviceId } from '../domain/index.js';
 import { createJsonLogger, LoggerTelemetry, type JsonLogger } from '../observability/index.js';
@@ -51,6 +55,7 @@ export interface RunningRuntime extends RuntimeResource {
   readonly scheduleSyncService: ScheduleSyncService;
   readonly digitalTwin: ReturnType<typeof createDigitalTwin>;
   readonly simulatorControlServer: SimulatorControlServer;
+  readonly feedingOrchestrator: FeedingOrchestrator;
 }
 
 const defaultDependencies: RuntimeDependencies = Object.freeze({
@@ -87,6 +92,7 @@ export function bootstrapRuntime(options: BootstrapRuntimeOptions = {}): Running
   let scheduleSyncService: ScheduleSyncService;
   let digitalTwin: ReturnType<typeof createDigitalTwin>;
   let simulatorControlServer: SimulatorControlServer;
+  let feedingOrchestrator: FeedingOrchestrator;
   try {
     localStore = dependencies.openStore(config.sqlitePath);
     resources.push(localStore);
@@ -118,16 +124,27 @@ export function bootstrapRuntime(options: BootstrapRuntimeOptions = {}): Running
       clock,
       logger,
     });
+    const telemetry = new LoggerTelemetry(logger);
     digitalTwin = createDigitalTwin({
       seed: config.simulator.seed,
       initialTime: (options.now ?? (() => new Date()))(),
       scenario: config.simulator.scenario,
-      telemetry: new LoggerTelemetry(logger),
+      telemetry,
     });
     simulatorControlServer = new SimulatorControlServer(
       digitalTwin.controller,
       config.simulator.socketPath,
     );
+    feedingOrchestrator = new FeedingOrchestrator({
+      store: localStore,
+      executionLock: digitalTwin.executionLock,
+      motor: digitalTwin.motor,
+      weightSensor: digitalTwin.weightSensor,
+      clock: digitalTwin.clock,
+      deviceStateReporter,
+      telemetry,
+      maximumExecutionMs: config.feedingTimeoutMs,
+    });
   } catch (error) {
     let cleanupError: unknown;
     try {
@@ -150,6 +167,7 @@ export function bootstrapRuntime(options: BootstrapRuntimeOptions = {}): Running
     scheduleSyncService,
     digitalTwin,
     simulatorControlServer,
+    feedingOrchestrator,
     close(): void {
       if (closed) return;
       closed = true;

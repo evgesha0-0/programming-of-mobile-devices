@@ -1,5 +1,6 @@
 import type {
   DayOfWeek,
+  CommandId,
   FeedingId,
   ScheduleId,
   UtcDateTime,
@@ -64,12 +65,70 @@ export interface HeartbeatDeliveryReceipt {
   readonly requestId: string | null;
 }
 
+interface FeedingIntentBase {
+  readonly feedingId: FeedingId;
+  readonly portionGrams: number;
+  readonly createdAt: UtcDateTime;
+}
+
+export interface ManualFeedingIntent extends FeedingIntentBase {
+  readonly source: 'manual';
+  readonly commandId: CommandId;
+  readonly scheduleId: null;
+}
+
+export interface ScheduledFeedingIntent extends FeedingIntentBase {
+  readonly source: 'scheduled';
+  readonly commandId: null;
+  readonly scheduleId: ScheduleId;
+}
+
+export type FeedingIntent = ManualFeedingIntent | ScheduledFeedingIntent;
+export type LocalFeedingStatus = 'pending' | 'running' | 'completed' | 'failed' | 'expired';
+
+export type StoredLocalFeeding = FeedingIntent & Readonly<{
+  readonly status: LocalFeedingStatus;
+  readonly actualGrams: number | null;
+  readonly startedAt: UtcDateTime | null;
+  readonly finishedAt: UtcDateTime | null;
+  readonly errorCode: string | null;
+  readonly errorMessage: string | null;
+  readonly terminalPayload: string | null;
+}>;
+
+interface FeedingCompletionBase {
+  readonly feedingId: FeedingId;
+  readonly startedAt: UtcDateTime;
+  readonly finishedAt: UtcDateTime;
+  readonly terminalPayload: string;
+}
+
+export interface CompletedFeeding extends FeedingCompletionBase {
+  readonly status: 'completed';
+  readonly actualGrams: number;
+  readonly errorCode: null;
+  readonly errorMessage: null;
+}
+
+export interface FailedFeeding extends FeedingCompletionBase {
+  readonly status: 'failed';
+  readonly actualGrams: number | null;
+  readonly errorCode: string;
+  readonly errorMessage: string;
+}
+
+export type FeedingCompletion = CompletedFeeding | FailedFeeding;
+
 export interface LocalStore {
   close(): void;
   getSchemaVersion(): number;
   getLastHeartbeat(): StoredHeartbeat | null;
   savePendingHeartbeat(payload: ReportDeviceStateRequest): void;
   markHeartbeatDelivered(receipt: HeartbeatDeliveryReceipt): boolean;
+  getFeeding(feedingId: FeedingId): StoredLocalFeeding | null;
+  recordFeedingIntent(intent: FeedingIntent): boolean;
+  markFeedingRunning(feedingId: FeedingId, startedAt: UtcDateTime): boolean;
+  completeFeedingAndEnqueue(completion: FeedingCompletion, outbox: NewOutboxMessage): number;
   getScheduleSnapshot(): LocalScheduleSnapshot | null;
   replaceScheduleSnapshot(snapshot: LocalScheduleSnapshot): void;
   claimScheduleOccurrence(claim: ScheduleOccurrenceClaim): boolean;
@@ -77,6 +136,20 @@ export interface LocalStore {
   listPendingOutbox(limit: number, availableAt: UtcDateTime): OutboxMessage[];
   rescheduleOutbox(id: number, nextAttemptAt: UtcDateTime, lastError: string): boolean;
   markOutboxDelivered(id: number, deliveredAt: UtcDateTime): boolean;
+}
+
+export class FeedingIntentConflictError extends Error {
+  constructor(feedingId: FeedingId) {
+    super(`Feeding intent ${feedingId} has conflicting content`);
+    this.name = 'FeedingIntentConflictError';
+  }
+}
+
+export class FeedingStateConflictError extends Error {
+  constructor(feedingId: FeedingId) {
+    super(`Feeding ${feedingId} is not in the required execution state`);
+    this.name = 'FeedingStateConflictError';
+  }
 }
 
 export class NonMonotonicHeartbeatError extends Error {
