@@ -4,7 +4,7 @@ import {
   type LoadRuntimeConfigOptions,
   type RuntimeConfig,
 } from '../config/index.js';
-import { DeviceStateReporter } from '../application/index.js';
+import { DeviceStateReporter, ScheduleSyncService } from '../application/index.js';
 import { serviceMetadata } from '../app.js';
 import type { DeviceId } from '../domain/index.js';
 import { createJsonLogger, type JsonLogger } from '../observability/index.js';
@@ -44,6 +44,7 @@ export interface RunningRuntime extends RuntimeResource {
   readonly localStore: LocalStore;
   readonly backendGateway: BackendGateway;
   readonly deviceStateReporter: DeviceStateReporter;
+  readonly scheduleSyncService: ScheduleSyncService;
 }
 
 const defaultDependencies: RuntimeDependencies = Object.freeze({
@@ -77,6 +78,7 @@ export function bootstrapRuntime(options: BootstrapRuntimeOptions = {}): Running
   let localStore: LocalStore;
   let backendGateway: BackendGateway;
   let deviceStateReporter: DeviceStateReporter;
+  let scheduleSyncService: ScheduleSyncService;
   try {
     localStore = dependencies.openStore(config.sqlitePath);
     resources.push(localStore);
@@ -89,6 +91,7 @@ export function bootstrapRuntime(options: BootstrapRuntimeOptions = {}): Running
       backoffMaxMs: config.backoff.maxMs,
     }, logger);
     resources.push(backendGateway);
+    const clock = new SystemClock();
     deviceStateReporter = new DeviceStateReporter({
       deviceId: config.deviceId,
       firmwareVersion: serviceMetadata.version,
@@ -96,7 +99,15 @@ export function bootstrapRuntime(options: BootstrapRuntimeOptions = {}): Running
       maxClockSkewMs: config.maxClockSkewMs,
       gateway: backendGateway,
       store: localStore,
-      clock: new SystemClock(),
+      clock,
+      logger,
+    });
+    scheduleSyncService = new ScheduleSyncService({
+      deviceId: config.deviceId,
+      syncIntervalMs: config.intervals.scheduleSyncMs,
+      gateway: backendGateway,
+      store: localStore,
+      clock,
       logger,
     });
   } catch (error) {
@@ -118,6 +129,7 @@ export function bootstrapRuntime(options: BootstrapRuntimeOptions = {}): Running
     localStore,
     backendGateway,
     deviceStateReporter,
+    scheduleSyncService,
     close(): void {
       if (closed) return;
       closed = true;
