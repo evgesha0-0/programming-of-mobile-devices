@@ -11,13 +11,15 @@
   "scripts": {
     "dev": "tsx watch src/main.ts",
     "build": "tsc -p tsconfig.json",
+    "simctl": "node dist/simulator/cli.js",
     "start": "node dist/main.js",
     "typecheck": "tsc -p tsconfig.check.json",
     "test": "tsx --test tests/**/*.test.ts",
     "test:gateway": "tsx --test tests/backend-http/http-backend-gateway.contract.test.ts tests/runtime/bootstrap.test.ts",
     "test:runtime": "tsx --test tests/config/runtime-config.test.ts tests/observability/json-logger.test.ts tests/runtime/bootstrap.test.ts",
     "test:state": "tsx --test tests/application/device-state-reporter.test.ts tests/storage/device-heartbeat.test.ts tests/backend-http/http-backend-gateway.contract.test.ts",
-    "test:schedules": "tsx --test tests/application/schedule-sync-service.test.ts tests/storage/sqlite-local-store.test.ts"
+    "test:schedules": "tsx --test tests/application/schedule-sync-service.test.ts tests/storage/sqlite-local-store.test.ts",
+    "test:simulator": "tsx --test tests/simulator/digital-twin.test.ts"
   },
   "devDependencies": {
     "@types/node": "^24.10.0",

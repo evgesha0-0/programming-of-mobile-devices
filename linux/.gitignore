@@ -11,6 +11,7 @@ secrets/
 *.sqlite-shm
 *.sqlite-wal
 *.sqlite.lock
+*.sock
 *.log
 .env
 .env.*

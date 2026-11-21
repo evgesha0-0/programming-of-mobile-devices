@@ -3,6 +3,12 @@ import { bootstrapRuntime, type BootstrapRuntimeOptions } from './bootstrap.js';
 
 export async function runRuntime(options: BootstrapRuntimeOptions = {}): Promise<void> {
   const runtime = bootstrapRuntime(options);
+  try {
+    await runtime.simulatorControlServer.start();
+  } catch (error) {
+    runtime.close();
+    throw error;
+  }
   const controller = new AbortController();
   const shutdown = createShutdownWaiter();
   const reporter = runtime.deviceStateReporter.run(controller.signal);
@@ -26,7 +32,11 @@ export async function runRuntime(options: BootstrapRuntimeOptions = {}): Promise
     controller.abort();
     runtime.backendGateway.close();
     await Promise.allSettled(services);
-    runtime.close();
+    try {
+      await runtime.simulatorControlServer.close();
+    } finally {
+      runtime.close();
+    }
   }
 }
 

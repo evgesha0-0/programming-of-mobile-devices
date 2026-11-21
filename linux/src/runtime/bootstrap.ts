@@ -7,11 +7,15 @@ import {
 import { DeviceStateReporter, ScheduleSyncService } from '../application/index.js';
 import { serviceMetadata } from '../app.js';
 import type { DeviceId } from '../domain/index.js';
-import { createJsonLogger, type JsonLogger } from '../observability/index.js';
+import { createJsonLogger, LoggerTelemetry, type JsonLogger } from '../observability/index.js';
 import { HttpBackendGateway } from '../adapters/backend-http/index.js';
 import { SqliteLocalStore } from '../adapters/storage-sqlite/index.js';
 import { SystemClock } from '../adapters/system-clock/index.js';
 import type { BackendGateway, LocalStore } from '../ports/index.js';
+import {
+  createDigitalTwin,
+  SimulatorControlServer,
+} from '../simulator/index.js';
 
 export interface RuntimeResource {
   close(): void;
@@ -45,6 +49,8 @@ export interface RunningRuntime extends RuntimeResource {
   readonly backendGateway: BackendGateway;
   readonly deviceStateReporter: DeviceStateReporter;
   readonly scheduleSyncService: ScheduleSyncService;
+  readonly digitalTwin: ReturnType<typeof createDigitalTwin>;
+  readonly simulatorControlServer: SimulatorControlServer;
 }
 
 const defaultDependencies: RuntimeDependencies = Object.freeze({
@@ -79,6 +85,8 @@ export function bootstrapRuntime(options: BootstrapRuntimeOptions = {}): Running
   let backendGateway: BackendGateway;
   let deviceStateReporter: DeviceStateReporter;
   let scheduleSyncService: ScheduleSyncService;
+  let digitalTwin: ReturnType<typeof createDigitalTwin>;
+  let simulatorControlServer: SimulatorControlServer;
   try {
     localStore = dependencies.openStore(config.sqlitePath);
     resources.push(localStore);
@@ -110,6 +118,16 @@ export function bootstrapRuntime(options: BootstrapRuntimeOptions = {}): Running
       clock,
       logger,
     });
+    digitalTwin = createDigitalTwin({
+      seed: config.simulator.seed,
+      initialTime: (options.now ?? (() => new Date()))(),
+      scenario: config.simulator.scenario,
+      telemetry: new LoggerTelemetry(logger),
+    });
+    simulatorControlServer = new SimulatorControlServer(
+      digitalTwin.controller,
+      config.simulator.socketPath,
+    );
   } catch (error) {
     let cleanupError: unknown;
     try {
@@ -130,6 +148,8 @@ export function bootstrapRuntime(options: BootstrapRuntimeOptions = {}): Running
     backendGateway,
     deviceStateReporter,
     scheduleSyncService,
+    digitalTwin,
+    simulatorControlServer,
     close(): void {
       if (closed) return;
       closed = true;

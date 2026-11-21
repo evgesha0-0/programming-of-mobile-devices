@@ -4,9 +4,13 @@ import { resolve } from 'node:path';
 import { z, ZodError } from 'zod';
 
 import { deviceIdSchema, type DeviceId } from '../domain/index.js';
+import type { SimulatorScenarioName } from '../simulator/scenario.js';
 
 const deviceTokenPattern = /^dvc_[A-Za-z0-9_-]{43}$/;
 const loopbackHosts = new Set(['localhost', '127.0.0.1', '[::1]']);
+const defaultSimulatorSocketPath = process.platform === 'win32'
+  ? '\\\\.\\pipe\\smart-cat-feeder-simulator'
+  : '/tmp/smart-cat-feeder-simulator.sock';
 
 const environmentSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
@@ -24,6 +28,16 @@ const environmentSchema = z.object({
   BACKOFF_INITIAL_MS: integerEnvironmentValue(1_000, 100, 60_000),
   BACKOFF_MAX_MS: integerEnvironmentValue(60_000, 100, 600_000),
   MAX_CLOCK_SKEW_MS: integerEnvironmentValue(30_000, 0, 300_000),
+  SIMULATOR_SEED: z.string().min(1).max(128).default('smart-cat-feeder'),
+  SIMULATOR_SCENARIO: z.enum([
+    'normal',
+    'underfeed',
+    'overfeed',
+    'motor-jam',
+    'sensor-timeout',
+    'sensor-disconnect',
+  ]).default('normal'),
+  SIMULATOR_SOCKET_PATH: z.string().min(1).default(defaultSimulatorSocketPath),
 }).superRefine((environment, context) => {
   const hasInlineToken = environment.DEVICE_TOKEN !== undefined;
   const hasTokenFile = environment.DEVICE_TOKEN_FILE !== undefined;
@@ -65,6 +79,11 @@ export interface RuntimeConfig {
     maxMs: number;
   }>;
   readonly maxClockSkewMs: number;
+  readonly simulator: Readonly<{
+    seed: string;
+    scenario: SimulatorScenarioName;
+    socketPath: string;
+  }>;
 }
 
 export interface RuntimeConfigSummary {
@@ -78,6 +97,7 @@ export interface RuntimeConfigSummary {
   readonly requestTimeoutMs: number;
   readonly backoff: RuntimeConfig['backoff'];
   readonly maxClockSkewMs: number;
+  readonly simulator: RuntimeConfig['simulator'];
 }
 
 export interface LoadRuntimeConfigOptions {
@@ -111,6 +131,7 @@ export function loadRuntimeConfig(
   const backendUrl = parseBackendUrl(environment.BACKEND_URL, environment.NODE_ENV);
   const sqlitePath = parseSqlitePath(environment.SQLITE_PATH, cwd);
   const deviceToken = resolveDeviceToken(environment, cwd, options.readSecretFile);
+  const simulatorSocketPath = parseSimulatorSocketPath(environment.SIMULATOR_SOCKET_PATH, cwd);
 
   return Object.freeze({
     nodeEnvironment: environment.NODE_ENV,
@@ -131,6 +152,11 @@ export function loadRuntimeConfig(
       maxMs: environment.BACKOFF_MAX_MS,
     }),
     maxClockSkewMs: environment.MAX_CLOCK_SKEW_MS,
+    simulator: Object.freeze({
+      seed: environment.SIMULATOR_SEED,
+      scenario: environment.SIMULATOR_SCENARIO,
+      socketPath: simulatorSocketPath,
+    }),
   });
 }
 
@@ -146,6 +172,7 @@ export function runtimeConfigSummary(config: RuntimeConfig): RuntimeConfigSummar
     requestTimeoutMs: config.requestTimeoutMs,
     backoff: config.backoff,
     maxClockSkewMs: config.maxClockSkewMs,
+    simulator: config.simulator,
   });
 }
 
@@ -189,6 +216,16 @@ function parseSqlitePath(value: string, cwd: string): string {
       'SQLITE_PATH must be a persistent file path without surrounding whitespace',
     ]);
   }
+  return resolve(cwd, value);
+}
+
+function parseSimulatorSocketPath(value: string, cwd: string): string {
+  if (value !== value.trim() || value.includes('\0')) {
+    throw new RuntimeConfigurationError([
+      'SIMULATOR_SOCKET_PATH must not contain surrounding whitespace',
+    ]);
+  }
+  if (process.platform === 'win32' && value.startsWith('\\\\.\\pipe\\')) return value;
   return resolve(cwd, value);
 }
 
