@@ -7,6 +7,7 @@ import {
   safeStartupFailureMessage,
   type RuntimeDependencies,
 } from '../../src/runtime/index.js';
+import type { BackendGateway } from '../../src/ports/index.js';
 
 const deviceToken = `dvc_${'C'.repeat(43)}`;
 
@@ -20,7 +21,7 @@ test('invalid configuration fails before opening storage or network', () => {
     },
     openNetwork() {
       networkOpened = true;
-      return { close() {} };
+      return fakeBackendGateway(() => {});
     },
   };
 
@@ -44,7 +45,7 @@ test('runtime opens resources after validation and closes them in reverse order'
     openNetwork(config) {
       events.push('network:open');
       assert.equal(config.deviceToken, deviceToken);
-      return { close: () => events.push('network:close') };
+      return fakeBackendGateway(() => events.push('network:close'));
     },
   };
 
@@ -88,6 +89,10 @@ test('unexpected startup failures do not expose internal error details', () => {
     'Runtime startup failed',
   );
 });
+
+function fakeBackendGateway(close: () => void): BackendGateway {
+  return { close } as BackendGateway;
+}
 
 function validEnvironment(): Record<string, string> {
   return {

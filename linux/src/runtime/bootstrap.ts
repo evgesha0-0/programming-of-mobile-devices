@@ -6,7 +6,9 @@ import {
 } from '../config/index.js';
 import type { DeviceId } from '../domain/index.js';
 import { createJsonLogger, type JsonLogger } from '../observability/index.js';
+import { HttpBackendGateway } from '../adapters/backend-http/index.js';
 import { SqliteLocalStore } from '../adapters/storage-sqlite/index.js';
+import type { BackendGateway } from '../ports/index.js';
 
 export interface RuntimeResource {
   close(): void;
@@ -17,11 +19,13 @@ export interface NetworkBootstrapConfig {
   readonly deviceId: DeviceId;
   readonly deviceToken: string;
   readonly requestTimeoutMs: number;
+  readonly backoffInitialMs: number;
+  readonly backoffMaxMs: number;
 }
 
 export interface RuntimeDependencies {
   readonly openStore: (sqlitePath: string) => RuntimeResource;
-  readonly openNetwork?: (config: NetworkBootstrapConfig) => RuntimeResource;
+  readonly openNetwork: (config: NetworkBootstrapConfig, logger: JsonLogger) => BackendGateway;
 }
 
 export interface BootstrapRuntimeOptions extends LoadRuntimeConfigOptions {
@@ -34,10 +38,20 @@ export interface BootstrapRuntimeOptions extends LoadRuntimeConfigOptions {
 export interface RunningRuntime extends RuntimeResource {
   readonly config: RuntimeConfig;
   readonly logger: JsonLogger;
+  readonly backendGateway: BackendGateway;
 }
 
 const defaultDependencies: RuntimeDependencies = Object.freeze({
   openStore: (sqlitePath: string) => SqliteLocalStore.open({ databasePath: sqlitePath }),
+  openNetwork: (config: NetworkBootstrapConfig, logger: JsonLogger) => new HttpBackendGateway({
+    backendUrl: config.backendUrl,
+    deviceId: config.deviceId,
+    deviceToken: config.deviceToken,
+    requestTimeoutMs: config.requestTimeoutMs,
+    backoffInitialMs: config.backoffInitialMs,
+    backoffMaxMs: config.backoffMaxMs,
+    logger,
+  }),
 });
 
 export function bootstrapRuntime(options: BootstrapRuntimeOptions = {}): RunningRuntime {
@@ -55,16 +69,18 @@ export function bootstrapRuntime(options: BootstrapRuntimeOptions = {}): Running
   const resources: RuntimeResource[] = [];
 
   logger.info('runtime_configuration_validated', runtimeConfigSummary(config));
+  let backendGateway: BackendGateway;
   try {
     resources.push(dependencies.openStore(config.sqlitePath));
-    if (dependencies.openNetwork) {
-      resources.push(dependencies.openNetwork({
-        backendUrl: config.backendUrl,
-        deviceId: config.deviceId,
-        deviceToken: config.deviceToken,
-        requestTimeoutMs: config.requestTimeoutMs,
-      }));
-    }
+    backendGateway = dependencies.openNetwork({
+      backendUrl: config.backendUrl,
+      deviceId: config.deviceId,
+      deviceToken: config.deviceToken,
+      requestTimeoutMs: config.requestTimeoutMs,
+      backoffInitialMs: config.backoff.initialMs,
+      backoffMaxMs: config.backoff.maxMs,
+    }, logger);
+    resources.push(backendGateway);
   } catch (error) {
     let cleanupError: unknown;
     try {
@@ -81,6 +97,7 @@ export function bootstrapRuntime(options: BootstrapRuntimeOptions = {}): Running
   return Object.freeze({
     config,
     logger,
+    backendGateway,
     close(): void {
       if (closed) return;
       closed = true;
