@@ -1,3 +1,13 @@
-import { createStartupEvent } from './app.js';
+import { runRuntime, safeStartupFailureMessage } from './runtime/index.js';
 
-process.stdout.write(`${JSON.stringify(createStartupEvent())}\n`);
+try {
+  await runRuntime();
+} catch (error) {
+  process.stderr.write(`${JSON.stringify({
+    timestamp: new Date().toISOString(),
+    level: 'error',
+    event: 'runtime_start_failed',
+    data: { message: safeStartupFailureMessage(error) },
+  })}\n`);
+  process.exitCode = 1;
+}
