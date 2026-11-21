@@ -12,7 +12,10 @@ export class VirtualClock implements Clock {
   private currentMs: number;
   private readonly waiters: ClockWaiter[] = [];
 
-  constructor(initialTime: Date | string | number) {
+  constructor(
+    initialTime: Date | string | number,
+    private readonly autoAdvance = false,
+  ) {
     this.currentMs = toMilliseconds(initialTime);
   }
 
@@ -26,6 +29,11 @@ export class VirtualClock implements Clock {
     }
     if (signal.aborted) return Promise.reject(abortError());
     if (delayMs === 0) return Promise.resolve();
+    if (this.autoAdvance) {
+      return this.advanceBy(delayMs).then(() => {
+        if (signal.aborted) throw abortError();
+      });
+    }
 
     return new Promise((resolve, reject) => {
       const waiter: ClockWaiter = {

@@ -7,6 +7,7 @@ import {
 import {
   DeviceStateReporter,
   FeedingOrchestrator,
+  LocalScheduler,
   ScheduleSyncService,
 } from '../application/index.js';
 import { serviceMetadata } from '../app.js';
@@ -56,6 +57,7 @@ export interface RunningRuntime extends RuntimeResource {
   readonly digitalTwin: ReturnType<typeof createDigitalTwin>;
   readonly simulatorControlServer: SimulatorControlServer;
   readonly feedingOrchestrator: FeedingOrchestrator;
+  readonly localScheduler: LocalScheduler;
 }
 
 const defaultDependencies: RuntimeDependencies = Object.freeze({
@@ -93,6 +95,7 @@ export function bootstrapRuntime(options: BootstrapRuntimeOptions = {}): Running
   let digitalTwin: ReturnType<typeof createDigitalTwin>;
   let simulatorControlServer: SimulatorControlServer;
   let feedingOrchestrator: FeedingOrchestrator;
+  let localScheduler: LocalScheduler;
   try {
     localStore = dependencies.openStore(config.sqlitePath);
     resources.push(localStore);
@@ -130,6 +133,7 @@ export function bootstrapRuntime(options: BootstrapRuntimeOptions = {}): Running
       initialTime: (options.now ?? (() => new Date()))(),
       scenario: config.simulator.scenario,
       telemetry,
+      autoAdvance: config.simulator.autoAdvance,
     });
     simulatorControlServer = new SimulatorControlServer(
       digitalTwin.controller,
@@ -140,10 +144,21 @@ export function bootstrapRuntime(options: BootstrapRuntimeOptions = {}): Running
       executionLock: digitalTwin.executionLock,
       motor: digitalTwin.motor,
       weightSensor: digitalTwin.weightSensor,
-      clock: digitalTwin.clock,
+      clock,
       deviceStateReporter,
       telemetry,
       maximumExecutionMs: config.feedingTimeoutMs,
+    });
+    localScheduler = new LocalScheduler({
+      store: localStore,
+      backendGateway,
+      clock,
+      idGenerator: digitalTwin.idGenerator,
+      feedingOrchestrator,
+      telemetry,
+      logger,
+      tickIntervalMs: config.scheduler.tickMs,
+      maximumLatenessMs: config.scheduler.maxLatenessMs,
     });
   } catch (error) {
     let cleanupError: unknown;
@@ -168,6 +183,7 @@ export function bootstrapRuntime(options: BootstrapRuntimeOptions = {}): Running
     digitalTwin,
     simulatorControlServer,
     feedingOrchestrator,
+    localScheduler,
     close(): void {
       if (closed) return;
       closed = true;

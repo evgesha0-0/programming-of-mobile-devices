@@ -29,6 +29,8 @@ const environmentSchema = z.object({
   BACKOFF_MAX_MS: integerEnvironmentValue(60_000, 100, 600_000),
   MAX_CLOCK_SKEW_MS: integerEnvironmentValue(30_000, 0, 300_000),
   FEEDING_TIMEOUT_MS: integerEnvironmentValue(30_000, 1_000, 300_000),
+  SCHEDULER_TICK_MS: integerEnvironmentValue(1_000, 100, 60_000),
+  SCHEDULE_MAX_LATENESS_MS: integerEnvironmentValue(300_000, 1_000, 86_400_000),
   SIMULATOR_SEED: z.string().min(1).max(128).default('smart-cat-feeder'),
   SIMULATOR_SCENARIO: z.enum([
     'normal',
@@ -39,6 +41,7 @@ const environmentSchema = z.object({
     'sensor-disconnect',
   ]).default('normal'),
   SIMULATOR_SOCKET_PATH: z.string().min(1).default(defaultSimulatorSocketPath),
+  SIMULATOR_AUTO_ADVANCE: booleanEnvironmentValue(true),
 }).superRefine((environment, context) => {
   const hasInlineToken = environment.DEVICE_TOKEN !== undefined;
   const hasTokenFile = environment.DEVICE_TOKEN_FILE !== undefined;
@@ -81,10 +84,15 @@ export interface RuntimeConfig {
   }>;
   readonly maxClockSkewMs: number;
   readonly feedingTimeoutMs: number;
+  readonly scheduler: Readonly<{
+    tickMs: number;
+    maxLatenessMs: number;
+  }>;
   readonly simulator: Readonly<{
     seed: string;
     scenario: SimulatorScenarioName;
     socketPath: string;
+    autoAdvance: boolean;
   }>;
 }
 
@@ -100,6 +108,7 @@ export interface RuntimeConfigSummary {
   readonly backoff: RuntimeConfig['backoff'];
   readonly maxClockSkewMs: number;
   readonly feedingTimeoutMs: number;
+  readonly scheduler: RuntimeConfig['scheduler'];
   readonly simulator: RuntimeConfig['simulator'];
 }
 
@@ -156,10 +165,15 @@ export function loadRuntimeConfig(
     }),
     maxClockSkewMs: environment.MAX_CLOCK_SKEW_MS,
     feedingTimeoutMs: environment.FEEDING_TIMEOUT_MS,
+    scheduler: Object.freeze({
+      tickMs: environment.SCHEDULER_TICK_MS,
+      maxLatenessMs: environment.SCHEDULE_MAX_LATENESS_MS,
+    }),
     simulator: Object.freeze({
       seed: environment.SIMULATOR_SEED,
       scenario: environment.SIMULATOR_SCENARIO,
       socketPath: simulatorSocketPath,
+      autoAdvance: environment.SIMULATOR_AUTO_ADVANCE,
     }),
   });
 }
@@ -177,6 +191,7 @@ export function runtimeConfigSummary(config: RuntimeConfig): RuntimeConfigSummar
     backoff: config.backoff,
     maxClockSkewMs: config.maxClockSkewMs,
     feedingTimeoutMs: config.feedingTimeoutMs,
+    scheduler: config.scheduler,
     simulator: config.simulator,
   });
 }
@@ -187,6 +202,15 @@ function integerEnvironmentValue(defaultValue: number, minimum: number, maximum:
     if (typeof value !== 'string' || !/^(?:0|[1-9]\d*)$/.test(value)) return value;
     return Number(value);
   }, z.number().int().min(minimum).max(maximum));
+}
+
+function booleanEnvironmentValue(defaultValue: boolean) {
+  return z.preprocess((value) => {
+    if (value === undefined) return defaultValue;
+    if (value === 'true') return true;
+    if (value === 'false') return false;
+    return value;
+  }, z.boolean());
 }
 
 function parseBackendUrl(value: string, nodeEnvironment: NodeEnvironment): string {

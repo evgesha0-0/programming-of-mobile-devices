@@ -131,6 +131,7 @@ export interface LocalStore {
   completeFeedingAndEnqueue(completion: FeedingCompletion, outbox: NewOutboxMessage): number;
   getScheduleSnapshot(): LocalScheduleSnapshot | null;
   replaceScheduleSnapshot(snapshot: LocalScheduleSnapshot): void;
+  getScheduleOccurrence(occurrenceKey: string): ScheduleOccurrenceClaim | null;
   claimScheduleOccurrence(claim: ScheduleOccurrenceClaim): boolean;
   enqueueOutbox(message: NewOutboxMessage): number;
   listPendingOutbox(limit: number, availableAt: UtcDateTime): OutboxMessage[];

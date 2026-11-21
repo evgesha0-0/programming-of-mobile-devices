@@ -446,6 +446,24 @@ export class SqliteLocalStore implements LocalStore {
     });
   }
 
+  getScheduleOccurrence(occurrenceKey: string): ScheduleOccurrenceClaim | null {
+    this.assertOpen();
+    if (occurrenceKey.trim().length === 0) throw new TypeError('occurrenceKey must not be blank');
+    const row = this.database.prepare(`
+      SELECT occurrence_key, schedule_id, feeding_id, scheduled_for, claimed_at
+      FROM schedule_occurrences
+      WHERE occurrence_key = ?
+    `).get(occurrenceKey);
+    if (!row) return null;
+    return {
+      occurrenceKey: readString(row, 'occurrence_key'),
+      scheduleId: scheduleIdSchema.parse(readString(row, 'schedule_id')),
+      feedingId: feedingIdSchema.parse(readString(row, 'feeding_id')),
+      scheduledFor: utcDateTimeSchema.parse(readString(row, 'scheduled_for')),
+      claimedAt: utcDateTimeSchema.parse(readString(row, 'claimed_at')),
+    };
+  }
+
   claimScheduleOccurrence(claim: ScheduleOccurrenceClaim): boolean {
     this.assertOpen();
     validateOccurrenceClaim(claim);

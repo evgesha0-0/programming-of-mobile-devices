@@ -13,11 +13,13 @@ export async function runRuntime(options: BootstrapRuntimeOptions = {}): Promise
   const shutdown = createShutdownWaiter();
   const reporter = runtime.deviceStateReporter.run(controller.signal);
   const scheduleSync = runtime.scheduleSyncService.run(controller.signal);
-  const services = [reporter, scheduleSync] as const;
+  const scheduler = runtime.localScheduler.run(controller.signal);
+  const services = [reporter, scheduleSync, scheduler] as const;
   try {
     const outcome = await Promise.race([
       reporter.then(() => ({ kind: 'reporter' as const })),
       scheduleSync.then(() => ({ kind: 'schedule_sync' as const })),
+      scheduler.then(() => ({ kind: 'scheduler' as const })),
       shutdown.promise.then((signal) => ({ kind: 'signal' as const, signal })),
     ]);
     if (outcome.kind !== 'signal') {

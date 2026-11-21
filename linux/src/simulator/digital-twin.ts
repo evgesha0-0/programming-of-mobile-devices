@@ -23,11 +23,12 @@ export interface CreateDigitalTwinOptions {
   readonly initialHopperGrams?: number;
   readonly initialBowlGrams?: number;
   readonly telemetry?: Telemetry;
+  readonly autoAdvance?: boolean;
 }
 
 export function createDigitalTwin(options: CreateDigitalTwinOptions) {
   const telemetry = options.telemetry ?? noOpTelemetry;
-  const clock = new VirtualClock(options.initialTime);
+  const clock = new VirtualClock(options.initialTime, options.autoAdvance ?? false);
   const world = new SimulatorWorld(
     clock,
     new SeededRandom(options.seed),
