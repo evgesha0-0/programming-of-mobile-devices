@@ -9,6 +9,7 @@ import { PGlite } from '@electric-sql/pglite';
 
 import { createCommandRepository, type CommandDatabase } from '../src/commands/command.repository.js';
 import { createDeviceAuthenticationRepository } from '../src/authentication/device-authentication.repository.js';
+import { createUserAuthenticationRepository } from '../src/authentication/user-authentication.repository.js';
 import { loadMigrations, runMigrations, type Migration, type MigrationConnection } from '../src/db/migrations.js';
 import { createDeviceRepository, type QueryExecutor } from '../src/devices/device.repository.js';
 import { createFeedingRepository, type FeedingDatabase } from '../src/feedings/feeding.repository.js';
@@ -74,11 +75,12 @@ test('migrations create tables, and the second run preserves existing data', asy
     '001_initial_schema.sql',
     '002_device_credentials.sql',
     '003_user_device_access.sql',
+    '004_user_credentials.sql',
   ]);
   const id = await device(db);
   assert.deepEqual(await runMigrations(client(db)), []);
   assert.equal((await db.query('SELECT * FROM devices WHERE device_id = $1', [id])).rows.length, 1);
-  assert.equal((await db.query('SELECT * FROM schema_migrations')).rows.length, 3);
+  assert.equal((await db.query('SELECT * FROM schema_migrations')).rows.length, 4);
 });
 
 test('changed or missing applied migration is rejected without changing the database', async (t) => {
@@ -87,19 +89,19 @@ test('changed or missing applied migration is rejected without changing the data
   await runMigrations(client(db), migrations);
   await assert.rejects(runMigrations(client(db), [migration('001_initial_schema.sql', 'SELECT 1')]), /history differs/);
   await assert.rejects(runMigrations(client(db), []), /history differs/);
-  assert.equal((await db.query('SELECT * FROM schema_migrations')).rows.length, 3);
+  assert.equal((await db.query('SELECT * FROM schema_migrations')).rows.length, 4);
 });
 
 test('failure rolls back all pending migrations and journal entries in the batch', async (t) => {
   const db = new PGlite(); t.after(() => db.close());
   const base = await loadMigrations();
   await runMigrations(client(db), base);
-  const next = migration('004_example.sql', 'CREATE TABLE migration_probe (id integer)');
-  const broken = migration('005_broken.sql', 'INSERT INTO missing_table VALUES (1)');
+  const next = migration('005_example.sql', 'CREATE TABLE migration_probe (id integer)');
+  const broken = migration('006_broken.sql', 'INSERT INTO missing_table VALUES (1)');
   await assert.rejects(runMigrations(client(db), [...base, next, broken]), /missing_table/);
   assert.equal((await db.query<{ name: string | null }>("SELECT to_regclass('migration_probe') AS name")).rows[0]?.name, null);
-  assert.equal((await db.query('SELECT * FROM schema_migrations')).rows.length, 3);
-  assert.deepEqual(await runMigrations(client(db), [...base, next]), ['004_example.sql']);
+  assert.equal((await db.query('SELECT * FROM schema_migrations')).rows.length, 4);
+  assert.deepEqual(await runMigrations(client(db), [...base, next]), ['005_example.sql']);
 });
 
 test('migration loader normalizes Windows line endings and rejects duplicate versions', async (t) => {
@@ -375,6 +377,51 @@ test('user and external identity lifecycle timestamps cannot move backwards', as
   await db.query(`UPDATE users SET disabled_at = '2026-11-23T00:02:00Z' WHERE user_id = $1`, [userId]);
   await assert.rejects(db.query('UPDATE users SET disabled_at = NULL WHERE user_id = $1', [userId]),
     /cannot be restored/);
+});
+
+test('user authentication resolves only active access for the requested device', async (t) => {
+  const db = new PGlite(); t.after(() => db.close()); await runMigrations(client(db));
+  const repository = createUserAuthenticationRepository(transactionalDatabase(db));
+  const userId = randomUUID();
+  const credentialId = randomUUID();
+  const deviceId = await device(db);
+  const otherDeviceId = await device(db);
+  const tokenHash = createHash('sha256').update(`usr_${'a'.repeat(43)}`).digest();
+  await db.query('INSERT INTO users (user_id) VALUES ($1)', [userId]);
+  await db.query(`INSERT INTO user_credentials (
+      credential_id, user_id, token_hash, token_hint
+    ) VALUES ($1, $2, $3, $4)`, [
+    credentialId,
+    userId,
+    tokenHash,
+    tokenHash.subarray(0, 6).toString('hex'),
+  ]);
+  const accessId = randomUUID();
+  await db.query(`INSERT INTO user_devices (user_device_id, user_id, device_id, role)
+    VALUES ($1, $2, $3, 'owner')`, [accessId, userId, deviceId]);
+
+  assert.deepEqual(await repository.authenticateToken(tokenHash), { credentialId, userId });
+  assert.deepEqual(await repository.findActiveAccess(userId, deviceId), {
+    userId,
+    deviceId,
+    role: 'owner',
+  });
+  assert.equal(await repository.findActiveAccess(userId, otherDeviceId), null);
+  const used = await db.query<{ last_used_at: Date | null }>(
+    'SELECT last_used_at FROM user_credentials WHERE credential_id = $1',
+    [credentialId],
+  );
+  assert.ok(used.rows[0]?.last_used_at);
+
+  await db.query('UPDATE user_devices SET revoked_at = clock_timestamp() WHERE user_device_id = $1',
+    [accessId]);
+  assert.equal(await repository.findActiveAccess(userId, deviceId), null);
+  await db.query(`INSERT INTO user_devices (user_device_id, user_id, device_id, role)
+    VALUES ($1, $2, $3, 'viewer')`, [randomUUID(), userId, deviceId]);
+  assert.equal((await repository.findActiveAccess(userId, deviceId))?.role, 'viewer');
+
+  await db.query('UPDATE users SET disabled_at = clock_timestamp() WHERE user_id = $1', [userId]);
+  assert.equal(await repository.authenticateToken(tokenHash), null);
 });
 
 test('schedules reject invalid days, nonpositive portions, NaN, and duplicate revisions', async (t) => {

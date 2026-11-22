@@ -7,6 +7,10 @@ import {
   rejectingDeviceAuthenticator,
   type DeviceAuthenticator,
 } from './authentication/device-authentication.service.js';
+import {
+  rejectingUserAuthenticator,
+  type UserAuthenticator,
+} from './authentication/user-authentication.service.js';
 import type { DatabaseCheck } from './db/connection.js';
 import type { CommandRepository } from './commands/command.repository.js';
 import { createCommandService } from './commands/command.service.js';
@@ -30,6 +34,7 @@ export interface BuildAppOptions {
   feedingRepository: FeedingRepository;
   scheduleRepository: ScheduleRepository;
   deviceAuthenticator?: DeviceAuthenticator;
+  userAuthenticator?: UserAuthenticator;
   deviceOfflineAfterMs?: number;
   deviceStateNow?: () => Date;
   logger?: FastifyServerOptions['logger'];
@@ -47,24 +52,29 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
 
   app.setErrorHandler(errorHandler);
   app.decorateRequest('deviceIdentity', null);
+  app.decorateRequest('userIdentity', null);
   const deviceAuthenticator = options.deviceAuthenticator ?? rejectingDeviceAuthenticator;
+  const userAuthenticator = options.userAuthenticator ?? rejectingUserAuthenticator;
   await app.register(createHealthRoutes(options.checkDatabase));
   await app.register(createCommandRoutes(
     createCommandService(options.commandRepository),
     deviceAuthenticator,
+    userAuthenticator,
   ));
   await app.register(createDeviceStateRoutes(createDeviceService(
     options.deviceRepository,
     options.deviceOfflineAfterMs,
     options.deviceStateNow,
-  ), deviceAuthenticator));
+  ), deviceAuthenticator, userAuthenticator));
   await app.register(createScheduleRoutes(
     createScheduleService(options.scheduleRepository),
     deviceAuthenticator,
+    userAuthenticator,
   ));
   await app.register(createFeedingRoutes(
     createFeedingService(options.feedingRepository),
     deviceAuthenticator,
+    userAuthenticator,
   ));
 
   return app;

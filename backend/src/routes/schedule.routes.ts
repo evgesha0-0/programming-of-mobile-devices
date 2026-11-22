@@ -2,6 +2,8 @@ import type { FastifyPluginAsync } from 'fastify';
 
 import { getDeviceIdentity, setDeviceIdentity } from '../authentication/device-identity.js';
 import type { DeviceAuthenticator } from '../authentication/device-authentication.service.js';
+import { getUserIdentity, setUserIdentity } from '../authentication/user-identity.js';
+import type { UserAuthenticator } from '../authentication/user-authentication.service.js';
 import { daysOfWeek } from '../schedules/schedule.types.js';
 import type { ScheduleInput, ScheduleService } from '../schedules/schedule.service.js';
 
@@ -171,12 +173,23 @@ const syncResponseSchema = {
 export function createScheduleRoutes(
   scheduleService: ScheduleService,
   deviceAuthenticator: DeviceAuthenticator,
+  userAuthenticator: UserAuthenticator,
 ): FastifyPluginAsync {
   return async (fastify): Promise<void> => {
     fastify.get<{ Params: DeviceParams }>(
       '/api/v1/devices/:device_id/schedules',
-      { schema: { params: deviceParamsSchema, response: { 200: scheduleListResponseSchema } } },
-      async (request) => scheduleService.list(request.params.device_id),
+      {
+        onRequest: async (request) => setUserIdentity(
+          request,
+          await userAuthenticator.authenticate(
+            request.headers.authorization,
+            request.params.device_id,
+            'viewer',
+          ),
+        ),
+        schema: { params: deviceParamsSchema, response: { 200: scheduleListResponseSchema } },
+      },
+      async (request) => scheduleService.list(getUserIdentity(request).deviceId),
     );
 
     fastify.get<{ Params: DeviceParams; Querystring: SyncQuery }>(
@@ -203,18 +216,38 @@ export function createScheduleRoutes(
 
     fastify.post<{ Params: DeviceParams; Body: ScheduleInput }>(
       '/api/v1/devices/:device_id/schedules',
-      { schema: { params: deviceParamsSchema, body: scheduleInputSchema, response: { 201: scheduleResponseSchema } } },
+      {
+        onRequest: async (request) => setUserIdentity(
+          request,
+          await userAuthenticator.authenticate(
+            request.headers.authorization,
+            request.params.device_id,
+            'owner',
+          ),
+        ),
+        schema: { params: deviceParamsSchema, body: scheduleInputSchema, response: { 201: scheduleResponseSchema } },
+      },
       async (request, reply) => {
-        const result = await scheduleService.create(request.params.device_id, request.body);
+        const result = await scheduleService.create(getUserIdentity(request).deviceId, request.body);
         return reply.code(201).send(result);
       },
     );
 
     fastify.put<{ Params: ScheduleParams; Body: ScheduleInput }>(
       '/api/v1/devices/:device_id/schedules/:schedule_id',
-      { schema: { params: scheduleParamsSchema, body: scheduleInputSchema, response: { 200: scheduleResponseSchema } } },
+      {
+        onRequest: async (request) => setUserIdentity(
+          request,
+          await userAuthenticator.authenticate(
+            request.headers.authorization,
+            request.params.device_id,
+            'owner',
+          ),
+        ),
+        schema: { params: scheduleParamsSchema, body: scheduleInputSchema, response: { 200: scheduleResponseSchema } },
+      },
       async (request) => scheduleService.update(
-        request.params.device_id,
+        getUserIdentity(request).deviceId,
         request.params.schedule_id,
         request.body,
       ),
@@ -222,9 +255,19 @@ export function createScheduleRoutes(
 
     fastify.delete<{ Params: ScheduleParams }>(
       '/api/v1/devices/:device_id/schedules/:schedule_id',
-      { schema: { params: scheduleParamsSchema, response: { 200: deleteResponseSchema } } },
+      {
+        onRequest: async (request) => setUserIdentity(
+          request,
+          await userAuthenticator.authenticate(
+            request.headers.authorization,
+            request.params.device_id,
+            'owner',
+          ),
+        ),
+        schema: { params: scheduleParamsSchema, response: { 200: deleteResponseSchema } },
+      },
       async (request) => scheduleService.delete(
-        request.params.device_id,
+        getUserIdentity(request).deviceId,
         request.params.schedule_id,
       ),
     );

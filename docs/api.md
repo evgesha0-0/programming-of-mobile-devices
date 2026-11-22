@@ -477,11 +477,16 @@ Khadas создаёт `feeding_id` до локального выполнени�
 
 ### Android-клиент
 
-Android передаёт пользовательский JWT access token Keycloak/OIDC в
-`Authorization: Bearer <token>` по HTTPS. Backend проверяет подпись, `iss`, `sub`, `aud`, `exp`,
-`iat`, `jti` и доступ пользователя к указанному `device_id`. Вход выполняется через Authorization
-Code Flow с PKCE; роли `owner` и `viewer` назначаются отдельно для каждой кормушки и не берутся из
-глобального токена. Полный контракт зафиксирован в [android-identity.md](android-identity.md).
+Android передаёт непрозрачный пользовательский токен формата `usr_<secret>` в
+`Authorization: Bearer <token>` по HTTPS. Backend хранит только SHA-256-хеш токена, получает по
+нему внутреннего пользователя и проверяет его доступ к указанному `device_id`. Роли `owner` и
+`viewer` назначаются отдельно для каждой кормушки. Полный контракт зафиксирован в
+[android-identity.md](android-identity.md).
+
+Чтение состояния, расписаний и кормлений доступно `owner` и `viewer`. CRUD расписаний и создание
+ручной команды требуют `owner`. Отсутствующий или неверный токен возвращает `401 UNAUTHORIZED`,
+отсутствующая membership или недостаточная роль — `403 FORBIDDEN`. Backend использует
+`device_id` из проверенной membership и не разрешает читать ресурсы чужого устройства.
 
 ### Устройство Khadas
 

@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import { buildApp } from '../src/app.js';
 import { trustedDeviceAuthenticator } from './support/device-authenticator.js';
+import { trustedUserAuthenticator } from './support/user-authenticator.js';
 import type { CommandRepository } from '../src/commands/command.repository.js';
 import type { DeviceRepository } from '../src/devices/device.repository.js';
 import type {
@@ -75,6 +76,7 @@ async function appWith(
     checkDatabase: async () => undefined,
     commandRepository: unusedCommandRepository,
     deviceAuthenticator: trustedDeviceAuthenticator,
+    userAuthenticator: trustedUserAuthenticator,
     deviceRepository,
     deviceOfflineAfterMs: 120_000,
     deviceStateNow: now,

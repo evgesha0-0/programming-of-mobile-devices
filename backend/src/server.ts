@@ -1,6 +1,8 @@
 import { buildApp } from './app.js';
 import { createDeviceAuthenticationRepository } from './authentication/device-authentication.repository.js';
 import { createDeviceAuthenticator } from './authentication/device-authentication.service.js';
+import { createUserAuthenticationRepository } from './authentication/user-authentication.repository.js';
+import { createUserAuthenticator } from './authentication/user-authentication.service.js';
 import { createCommandRepository } from './commands/command.repository.js';
 import { loadEnv } from './config/env.js';
 import {
@@ -19,6 +21,7 @@ async function start(): Promise<void> {
     checkDatabase: () => checkDatabaseConnection(pool),
     commandRepository: createCommandRepository(pool),
     deviceAuthenticator: createDeviceAuthenticator(createDeviceAuthenticationRepository(pool)),
+    userAuthenticator: createUserAuthenticator(createUserAuthenticationRepository(pool)),
     deviceRepository: createDeviceRepository(pool),
     deviceOfflineAfterMs: env.deviceOfflineAfterSeconds * 1_000,
     feedingRepository: createFeedingRepository(pool),

@@ -8,6 +8,7 @@ import type { CommandRepository } from '../src/commands/command.repository.js';
 import type { DeviceRepository } from '../src/devices/device.repository.js';
 import type { FeedingRepository } from '../src/feedings/feeding.repository.js';
 import type { ScheduleRepository } from '../src/schedules/schedule.repository.js';
+import { trustedUserAuthenticator } from './support/user-authenticator.js';
 
 const deviceId = 'd6d174f4-e79f-49d1-9476-78bc99483752';
 const commandId = '1875723f-f6e1-4307-92c8-81577f1ea2fb';
@@ -43,6 +44,7 @@ test('all Khadas routes reject requests without device credentials before valida
     deviceRepository,
     feedingRepository,
     scheduleRepository,
+    userAuthenticator: trustedUserAuthenticator,
   });
   t.after(() => app.close());
 
@@ -70,6 +72,7 @@ test('Android read route is not protected by device credentials', async (t) => {
     deviceRepository,
     feedingRepository,
     scheduleRepository,
+    userAuthenticator: trustedUserAuthenticator,
   });
   t.after(() => app.close());
 

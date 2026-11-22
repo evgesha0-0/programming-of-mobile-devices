@@ -2,6 +2,8 @@ import type { FastifyPluginAsync } from 'fastify';
 
 import { getDeviceIdentity, setDeviceIdentity } from '../authentication/device-identity.js';
 import type { DeviceAuthenticator } from '../authentication/device-authentication.service.js';
+import { getUserIdentity, setUserIdentity } from '../authentication/user-identity.js';
+import type { UserAuthenticator } from '../authentication/user-authentication.service.js';
 import type {
   FeedingService,
   ScheduledFeedingInput,
@@ -205,11 +207,20 @@ const eventResponseSchema = {
 export function createFeedingRoutes(
   feedingService: FeedingService,
   deviceAuthenticator: DeviceAuthenticator,
+  userAuthenticator: UserAuthenticator,
 ): FastifyPluginAsync {
   return async (fastify): Promise<void> => {
     fastify.get<{ Params: DeviceParams; Querystring: FeedingHistoryQuery }>(
       '/api/v1/devices/:device_id/feedings',
       {
+        onRequest: async (request) => setUserIdentity(
+          request,
+          await userAuthenticator.authenticate(
+            request.headers.authorization,
+            request.params.device_id,
+            'viewer',
+          ),
+        ),
         schema: {
           params: deviceParamsSchema,
           querystring: historyQuerySchema,
@@ -217,7 +228,7 @@ export function createFeedingRoutes(
         },
       },
       async (request) => feedingService.listHistory(
-        request.params.device_id,
+        getUserIdentity(request).deviceId,
         request.query.limit ?? 50,
         request.query.cursor,
       ),
@@ -226,13 +237,21 @@ export function createFeedingRoutes(
     fastify.get<{ Params: FeedingParams }>(
       '/api/v1/devices/:device_id/feedings/:feeding_id',
       {
+        onRequest: async (request) => setUserIdentity(
+          request,
+          await userAuthenticator.authenticate(
+            request.headers.authorization,
+            request.params.device_id,
+            'viewer',
+          ),
+        ),
         schema: {
           params: feedingParamsSchema,
           response: { 200: feedingDetailsResponseSchema },
         },
       },
       async (request) => feedingService.getDetails(
-        request.params.device_id,
+        getUserIdentity(request).deviceId,
         request.params.feeding_id,
       ),
     );

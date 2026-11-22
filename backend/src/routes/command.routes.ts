@@ -2,6 +2,8 @@ import type { FastifyPluginAsync } from 'fastify';
 
 import { getDeviceIdentity, setDeviceIdentity } from '../authentication/device-identity.js';
 import type { DeviceAuthenticator } from '../authentication/device-authentication.service.js';
+import { getUserIdentity, setUserIdentity } from '../authentication/user-identity.js';
+import type { UserAuthenticator } from '../authentication/user-authentication.service.js';
 import type {
   AcknowledgeCommandInput,
   CommandService,
@@ -254,6 +256,7 @@ const manualResultResponseSchema = {
 export function createCommandRoutes(
   commandService: CommandService,
   deviceAuthenticator: DeviceAuthenticator,
+  userAuthenticator: UserAuthenticator,
 ): FastifyPluginAsync {
   return async (fastify): Promise<void> => {
     fastify.get<{ Params: DeviceParams; Querystring: PendingCommandQuery }>(
@@ -327,6 +330,14 @@ export function createCommandRoutes(
     fastify.post<{ Params: DeviceParams; Body: CreateManualCommandInput }>(
       '/api/v1/devices/:device_id/feeding-commands',
       {
+        onRequest: async (request) => setUserIdentity(
+          request,
+          await userAuthenticator.authenticate(
+            request.headers.authorization,
+            request.params.device_id,
+            'owner',
+          ),
+        ),
         schema: {
           params: deviceParamsSchema,
           body: commandBodySchema,
@@ -337,7 +348,7 @@ export function createCommandRoutes(
         },
       },
       async (request, reply) => {
-        const result = await commandService.create(request.params.device_id, request.body);
+        const result = await commandService.create(getUserIdentity(request).deviceId, request.body);
         return reply
           .code(result.created ? 202 : 200)
           .send(result.command);

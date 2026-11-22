@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { buildApp } from '../src/app.js';
+import { trustedUserAuthenticator } from './support/user-authenticator.js';
 import type { CommandRepository } from '../src/commands/command.repository.js';
 import type { DeviceRepository } from '../src/devices/device.repository.js';
 import type { FeedingRepository } from '../src/feedings/feeding.repository.js';
@@ -86,6 +87,7 @@ function memoryRepository(): FeedingRepository {
 async function appWith(feedingRepository = memoryRepository()) {
   return buildApp({
     checkDatabase: async () => undefined,
+    userAuthenticator: trustedUserAuthenticator,
     commandRepository: unusedCommandRepository,
     deviceRepository: unusedDeviceRepository,
     feedingRepository,
