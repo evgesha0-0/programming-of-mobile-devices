@@ -1,0 +1,81 @@
+import Fastify, {
+  type FastifyInstance,
+  type FastifyServerOptions,
+} from 'fastify';
+
+import {
+  rejectingDeviceAuthenticator,
+  type DeviceAuthenticator,
+} from './authentication/device-authentication.service.js';
+import {
+  rejectingUserAuthenticator,
+  type UserAuthenticator,
+} from './authentication/user-authentication.service.js';
+import type { DatabaseCheck } from './db/connection.js';
+import type { CommandRepository } from './commands/command.repository.js';
+import { createCommandService } from './commands/command.service.js';
+import { createDeviceService } from './devices/device.service.js';
+import type { DeviceRepository } from './devices/device.repository.js';
+import { createDeviceStateRoutes } from './routes/device-state.routes.js';
+import { createCommandRoutes } from './routes/command.routes.js';
+import { createFeedingRoutes } from './routes/feeding.routes.js';
+import { createHealthRoutes } from './routes/health.routes.js';
+import { createScheduleRoutes } from './routes/schedule.routes.js';
+import type { FeedingRepository } from './feedings/feeding.repository.js';
+import { createFeedingService } from './feedings/feeding.service.js';
+import type { ScheduleRepository } from './schedules/schedule.repository.js';
+import { createScheduleService } from './schedules/schedule.service.js';
+import { errorHandler } from './utils/error-handler.js';
+
+export interface BuildAppOptions {
+  checkDatabase: DatabaseCheck;
+  commandRepository: CommandRepository;
+  deviceRepository: DeviceRepository;
+  feedingRepository: FeedingRepository;
+  scheduleRepository: ScheduleRepository;
+  deviceAuthenticator?: DeviceAuthenticator;
+  userAuthenticator?: UserAuthenticator;
+  deviceOfflineAfterMs?: number;
+  deviceStateNow?: () => Date;
+  logger?: FastifyServerOptions['logger'];
+}
+
+export async function buildApp(options: BuildAppOptions): Promise<FastifyInstance> {
+  const app = Fastify({
+    logger: options.logger ?? false,
+    ajv: {
+      customOptions: {
+        removeAdditional: false,
+      },
+    },
+  });
+
+  app.setErrorHandler(errorHandler);
+  app.decorateRequest('deviceIdentity', null);
+  app.decorateRequest('userIdentity', null);
+  const deviceAuthenticator = options.deviceAuthenticator ?? rejectingDeviceAuthenticator;
+  const userAuthenticator = options.userAuthenticator ?? rejectingUserAuthenticator;
+  await app.register(createHealthRoutes(options.checkDatabase));
+  await app.register(createCommandRoutes(
+    createCommandService(options.commandRepository),
+    deviceAuthenticator,
+    userAuthenticator,
+  ));
+  await app.register(createDeviceStateRoutes(createDeviceService(
+    options.deviceRepository,
+    options.deviceOfflineAfterMs,
+    options.deviceStateNow,
+  ), deviceAuthenticator, userAuthenticator));
+  await app.register(createScheduleRoutes(
+    createScheduleService(options.scheduleRepository),
+    deviceAuthenticator,
+    userAuthenticator,
+  ));
+  await app.register(createFeedingRoutes(
+    createFeedingService(options.feedingRepository),
+    deviceAuthenticator,
+    userAuthenticator,
+  ));
+
+  return app;
+}

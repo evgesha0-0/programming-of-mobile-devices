@@ -1,0 +1,38 @@
+{
+  "name": "smart-cat-feeder-backend",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Backend service for Smart Cat Feeder",
+  "type": "module",
+  "main": "dist/server.js",
+  "engines": {
+    "node": ">=24 <25"
+  },
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/server.js",
+    "db:migrate": "tsx src/db/migrate.ts",
+    "db:migrate:production": "node dist/db/migrate.js",
+    "device:provision": "tsx src/provisioning/device-provisioning.cli.ts provision",
+    "device:provision:production": "node dist/provisioning/device-provisioning.cli.js provision",
+    "device:rotate-token": "tsx src/provisioning/device-provisioning.cli.ts rotate",
+    "device:rotate-token:production": "node dist/provisioning/device-provisioning.cli.js rotate",
+    "device:revoke-token": "tsx src/provisioning/device-provisioning.cli.ts revoke",
+    "device:revoke-token:production": "node dist/provisioning/device-provisioning.cli.js revoke",
+    "typecheck": "tsc -p tsconfig.check.json",
+    "test": "tsx --test --test-concurrency=1 tests/**/*.test.ts"
+  },
+  "dependencies": {
+    "dotenv": "^17.4.2",
+    "fastify": "^5.12.1",
+    "pg": "^8.23.0"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "0.5.11",
+    "@types/node": "^24.10.0",
+    "@types/pg": "^8.23.1",
+    "tsx": "^4.23.12",
+    "typescript": "^7.0.2"
+  }
+}
