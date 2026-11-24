@@ -52,6 +52,14 @@
     <string name="manual_feeding_poll_retry">Не удалось обновить результат. Повторяем запрос…</string>
     <string name="manual_feeding_poll_timeout">Автоматическая проверка остановлена. Результат можно проверить вручную.</string>
     <string name="manual_feeding_check">Проверить результат</string>
+    <string name="notification_channel_feeding_name">Результаты кормлений</string>
+    <string name="notification_channel_feeding_description">Завершение, ошибка или истечение ручной команды кормления</string>
+    <string name="notification_feeding_completed_title">Кормление выполнено</string>
+    <string name="notification_feeding_completed_body">Кормушка выдала %1$s г корма</string>
+    <string name="notification_feeding_failed_title">Ошибка кормления</string>
+    <string name="notification_feeding_failed_body">Кормление не выполнено: %1$s</string>
+    <string name="notification_feeding_expired_title">Команда кормления истекла</string>
+    <string name="notification_feeding_expired_body">Кормушка не выполнила команду до истечения срока</string>
     <string name="device_status_online">В сети</string>
     <string name="device_status_busy">Выполняет команду</string>
     <string name="device_status_error">Ошибка</string>

@@ -1,7 +1,10 @@
 package ru.smartcatfeeder;
 
+import android.Manifest;
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.content.pm.PackageManager;
+import android.os.Build;
 import android.os.Bundle;
 import android.text.InputType;
 import android.view.LayoutInflater;
@@ -29,10 +32,12 @@ import java.util.concurrent.TimeUnit;
 public final class MainActivity extends Activity {
     private static final String STATE_SCREEN = "selected_screen";
     private static final String CONNECTION_PREFERENCES = "connection";
+    private static final int REQUEST_NOTIFICATIONS = 1001;
 
     private ScreenNavigator navigator;
     private ConnectionSettingsStore connectionStore;
     private ConnectionSession connectionSession;
+    private FeedingNotifier feedingNotifier;
     private ExecutorService networkExecutor;
     private ScheduledExecutorService pollingExecutor;
     private Future<?> screenRequest;
@@ -54,6 +59,8 @@ public final class MainActivity extends Activity {
                 getSharedPreferences(CONNECTION_PREFERENCES, MODE_PRIVATE),
                 BuildConfig.DEBUG
         );
+        feedingNotifier = new FeedingNotifier(this);
+        feedingNotifier.ensureChannel();
         networkExecutor = Executors.newFixedThreadPool(2);
         pollingExecutor = Executors.newSingleThreadScheduledExecutor();
 
@@ -258,7 +265,10 @@ public final class MainActivity extends Activity {
                 .setMessage(getString(R.string.manual_feeding_confirm_message, portion))
                 .setPositiveButton(
                         R.string.manual_feeding_confirm_action,
-                        (dialog, which) -> sendManualCommand(content, command)
+                        (dialog, which) -> {
+                            requestNotificationPermissionIfNeeded();
+                            sendManualCommand(content, command);
+                        }
                 )
                 .setNegativeButton(R.string.manual_feeding_cancel, null)
                 .show();
@@ -511,6 +521,7 @@ public final class MainActivity extends Activity {
         ManualCommandResponse accepted = session.acceptedResponse();
         if (feeding.terminal()) {
             manualPollingTask = null;
+            feedingNotifier.notifyTerminal(feeding);
             loadDeviceState(content);
         } else if (ManualFeedingPollPolicy.shouldContinue(
                 feeding,
@@ -580,6 +591,16 @@ public final class MainActivity extends Activity {
         if (manualPollingTask != null) {
             manualPollingTask.cancel(true);
             manualPollingTask = null;
+        }
+    }
+
+    private void requestNotificationPermissionIfNeeded() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
+                && !feedingNotifier.hasPermission()) {
+            requestPermissions(
+                    new String[]{Manifest.permission.POST_NOTIFICATIONS},
+                    REQUEST_NOTIFICATIONS
+            );
         }
     }
 
