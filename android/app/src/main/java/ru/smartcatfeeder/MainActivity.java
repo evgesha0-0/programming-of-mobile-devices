@@ -23,6 +23,8 @@ import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 public final class MainActivity extends Activity {
     private static final String STATE_SCREEN = "selected_screen";
@@ -32,9 +34,12 @@ public final class MainActivity extends Activity {
     private ConnectionSettingsStore connectionStore;
     private ConnectionSession connectionSession;
     private ExecutorService networkExecutor;
+    private ScheduledExecutorService pollingExecutor;
     private Future<?> screenRequest;
     private int screenRequestVersion;
     private ManualCommand sendingManualCommand;
+    private Future<?> manualPollingTask;
+    private int manualPollingVersion;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -50,6 +55,7 @@ public final class MainActivity extends Activity {
                 BuildConfig.DEBUG
         );
         networkExecutor = Executors.newFixedThreadPool(2);
+        pollingExecutor = Executors.newSingleThreadScheduledExecutor();
 
         String restoredScreen = savedInstanceState == null || !connectionSession.isConnected()
                 ? null
@@ -72,8 +78,10 @@ public final class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        cancelManualFeedingPolling();
         cancelScreenRequest();
         networkExecutor.shutdownNow();
+        pollingExecutor.shutdownNow();
         super.onDestroy();
     }
 
@@ -93,6 +101,7 @@ public final class MainActivity extends Activity {
     }
 
     private void showScreen(AppScreen screen) {
+        cancelManualFeedingPolling();
         cancelScreenRequest();
         FrameLayout container = findViewById(R.id.screen_content);
         container.removeAllViews();
@@ -202,10 +211,13 @@ public final class MainActivity extends Activity {
                 .setOnClickListener(view -> showManualFeedingDialog(content));
         content.findViewById(R.id.manual_feeding_retry)
                 .setOnClickListener(view -> retryManualFeeding(content));
+        content.findViewById(R.id.manual_feeding_check)
+                .setOnClickListener(view -> startManualFeedingPolling(content, true));
         content.findViewById(R.id.device_state_refresh)
                 .setOnClickListener(view -> loadDeviceState(content));
         renderManualFeedingState(content);
         loadDeviceState(content);
+        startManualFeedingPolling(content, false);
     }
 
     private void showManualFeedingDialog(View content) {
@@ -315,6 +327,7 @@ public final class MainActivity extends Activity {
         sendingManualCommand = null;
         connectionSession.manualFeedingSession().markAccepted(command, response);
         renderManualFeedingState(content);
+        startManualFeedingPolling(content, false);
         loadDeviceState(content);
     }
 
@@ -355,6 +368,7 @@ public final class MainActivity extends Activity {
         ManualFeedingSession.State state = connectionSession.manualFeedingSession().state();
         View progress = content.findViewById(R.id.manual_feeding_progress);
         View retry = content.findViewById(R.id.manual_feeding_retry);
+        View check = content.findViewById(R.id.manual_feeding_check);
         View start = content.findViewById(R.id.manual_feeding_button);
 
         progress.setVisibility(state == ManualFeedingSession.State.SENDING
@@ -363,14 +377,13 @@ public final class MainActivity extends Activity {
         retry.setVisibility(state == ManualFeedingSession.State.RETRY_AVAILABLE
                 ? View.VISIBLE
                 : View.GONE);
-        start.setEnabled(state == ManualFeedingSession.State.IDLE);
+        check.setVisibility(View.GONE);
+        start.setEnabled(state == ManualFeedingSession.State.IDLE
+                || state == ManualFeedingSession.State.FINISHED);
 
-        if (state == ManualFeedingSession.State.ACCEPTED) {
-            showManualFeedingMessage(
-                    content,
-                    R.string.manual_feeding_accepted,
-                    R.color.status_online
-            );
+        if (state == ManualFeedingSession.State.ACCEPTED
+                || state == ManualFeedingSession.State.FINISHED) {
+            renderManualFeedingResult(content);
         } else if (state == ManualFeedingSession.State.RETRY_AVAILABLE) {
             showManualFeedingMessage(
                     content,
@@ -389,10 +402,185 @@ public final class MainActivity extends Activity {
     }
 
     private void showManualFeedingMessage(View content, int textResource, int colorResource) {
+        showManualFeedingMessage(content, getString(textResource), colorResource);
+    }
+
+    private void showManualFeedingMessage(View content, String text, int colorResource) {
         TextView message = content.findViewById(R.id.manual_feeding_message);
-        message.setText(textResource);
+        message.setText(text);
         message.setTextColor(getColor(colorResource));
         message.setVisibility(View.VISIBLE);
+    }
+
+    private void renderManualFeedingResult(View content) {
+        Feeding feeding = connectionSession.manualFeedingSession().currentFeeding();
+        if (feeding == null) {
+            return;
+        }
+        switch (feeding.status) {
+            case PENDING -> showManualFeedingMessage(
+                    content,
+                    R.string.manual_feeding_pending,
+                    R.color.status_busy
+            );
+            case RUNNING -> showManualFeedingMessage(
+                    content,
+                    R.string.manual_feeding_running,
+                    R.color.status_busy
+            );
+            case COMPLETED -> showManualFeedingMessage(
+                    content,
+                    getString(
+                            R.string.manual_feeding_completed,
+                            feeding.actualGrams.stripTrailingZeros().toPlainString()
+                    ),
+                    R.color.status_online
+            );
+            case FAILED -> showManualFeedingMessage(
+                    content,
+                    getString(
+                            R.string.manual_feeding_failed,
+                            feeding.errorMessage == null
+                                    ? feeding.errorCode
+                                    : feeding.errorCode + " — " + feeding.errorMessage
+                    ),
+                    R.color.error
+            );
+            case EXPIRED -> showManualFeedingMessage(
+                    content,
+                    R.string.manual_feeding_result_expired,
+                    R.color.text_secondary
+            );
+        }
+    }
+
+    private void startManualFeedingPolling(View content, boolean immediate) {
+        ManualFeedingSession session = connectionSession.manualFeedingSession();
+        Feeding feeding = session.currentFeeding();
+        ManualCommandResponse accepted = session.acceptedResponse();
+        if (session.state() != ManualFeedingSession.State.ACCEPTED
+                || feeding == null
+                || accepted == null) {
+            return;
+        }
+        cancelManualFeedingPolling();
+        int version = ++manualPollingVersion;
+        content.findViewById(R.id.manual_feeding_check).setVisibility(View.GONE);
+        scheduleManualFeedingPoll(
+                content,
+                version,
+                immediate ? java.time.Duration.ZERO : ManualFeedingPollPolicy.INITIAL_DELAY
+        );
+    }
+
+    private void scheduleManualFeedingPoll(
+            View content,
+            int version,
+            java.time.Duration delay
+    ) {
+        manualPollingTask = pollingExecutor.schedule(() -> {
+            ManualFeedingSession session = connectionSession.manualFeedingSession();
+            Feeding current = session.currentFeeding();
+            if (current == null || session.acceptedResponse() == null) {
+                return;
+            }
+            runOnUiThread(() -> {
+                if (canApplyManualFeedingPoll(content, version)) {
+                    content.findViewById(R.id.manual_feeding_progress)
+                            .setVisibility(View.VISIBLE);
+                }
+            });
+            try {
+                Feeding updated = new FeederRepository(connectionSession.requireSettings())
+                        .getFeeding(current.feedingId);
+                runOnUiThread(() -> applyManualFeedingPollResult(content, updated, version));
+            } catch (IOException error) {
+                runOnUiThread(() -> handleManualFeedingPollFailure(content, version));
+            }
+        }, delay.toMillis(), TimeUnit.MILLISECONDS);
+    }
+
+    private void applyManualFeedingPollResult(View content, Feeding feeding, int version) {
+        if (!canApplyManualFeedingPoll(content, version)) {
+            return;
+        }
+        ManualFeedingSession session = connectionSession.manualFeedingSession();
+        session.updateFeeding(feeding);
+        renderManualFeedingState(content);
+
+        ManualCommandResponse accepted = session.acceptedResponse();
+        if (feeding.terminal()) {
+            manualPollingTask = null;
+            loadDeviceState(content);
+        } else if (ManualFeedingPollPolicy.shouldContinue(
+                feeding,
+                accepted.expiresAt,
+                Instant.now()
+        )) {
+            scheduleManualFeedingPoll(
+                    content,
+                    version,
+                    ManualFeedingPollPolicy.RETRY_DELAY
+            );
+        } else {
+            showManualFeedingPollingTimeout(content);
+        }
+    }
+
+    private void handleManualFeedingPollFailure(View content, int version) {
+        if (!canApplyManualFeedingPoll(content, version)) {
+            return;
+        }
+        ManualFeedingSession session = connectionSession.manualFeedingSession();
+        Feeding feeding = session.currentFeeding();
+        ManualCommandResponse accepted = session.acceptedResponse();
+        content.findViewById(R.id.manual_feeding_progress).setVisibility(View.GONE);
+        if (feeding != null
+                && accepted != null
+                && ManualFeedingPollPolicy.shouldContinue(
+                feeding,
+                accepted.expiresAt,
+                Instant.now()
+        )) {
+            showManualFeedingMessage(
+                    content,
+                    R.string.manual_feeding_poll_retry,
+                    R.color.text_secondary
+            );
+            scheduleManualFeedingPoll(
+                    content,
+                    version,
+                    ManualFeedingPollPolicy.RETRY_DELAY
+            );
+        } else {
+            showManualFeedingPollingTimeout(content);
+        }
+    }
+
+    private void showManualFeedingPollingTimeout(View content) {
+        manualPollingTask = null;
+        content.findViewById(R.id.manual_feeding_progress).setVisibility(View.GONE);
+        content.findViewById(R.id.manual_feeding_check).setVisibility(View.VISIBLE);
+        showManualFeedingMessage(
+                content,
+                R.string.manual_feeding_poll_timeout,
+                R.color.error
+        );
+    }
+
+    private boolean canApplyManualFeedingPoll(View content, int version) {
+        return !isDestroyed()
+                && content.isAttachedToWindow()
+                && version == manualPollingVersion
+                && navigator.currentScreen() == AppScreen.DEVICE_STATE;
+    }
+
+    private void cancelManualFeedingPolling() {
+        manualPollingVersion++;
+        if (manualPollingTask != null) {
+            manualPollingTask.cancel(true);
+            manualPollingTask = null;
+        }
     }
 
     private void loadDeviceState(View content) {

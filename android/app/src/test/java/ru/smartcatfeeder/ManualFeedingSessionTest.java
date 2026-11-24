@@ -54,7 +54,38 @@ public final class ManualFeedingSessionTest {
 
         assertEquals(ManualFeedingSession.State.ACCEPTED, session.state());
         assertSame(response, session.acceptedResponse());
+        assertSame(response.feeding, session.currentFeeding());
         assertNull(session.retryCommand(Instant.parse("2026-11-24T10:01:00Z")));
+    }
+
+    @Test
+    public void terminalPollingResultFinishesAttempt() throws Exception {
+        ManualCommand command = command(COMMAND_ID);
+        ManualCommandResponse response = response(command);
+        ManualFeedingSession session = new ManualFeedingSession();
+        session.begin(command);
+        session.markAccepted(command, response);
+
+        Feeding completed = completedFeeding(FEEDING_ID, COMMAND_ID);
+        session.updateFeeding(completed);
+
+        assertEquals(ManualFeedingSession.State.FINISHED, session.state());
+        assertSame(completed, session.currentFeeding());
+    }
+
+    @Test
+    public void pollingResultMustBelongToAcceptedFeeding() throws Exception {
+        ManualCommand command = command(COMMAND_ID);
+        ManualFeedingSession session = new ManualFeedingSession();
+        session.begin(command);
+        session.markAccepted(command, response(command));
+
+        Feeding another = completedFeeding(
+                "1298e5e1-f5f4-44c8-8804-5ad0aafe8112",
+                COMMAND_ID
+        );
+
+        assertThrows(IllegalArgumentException.class, () -> session.updateFeeding(another));
     }
 
     @Test
@@ -91,6 +122,26 @@ public final class ManualFeedingSessionTest {
                         .put("error_message", JSONObject.NULL),
                 DEVICE_ID,
                 command
+        );
+    }
+
+    private static Feeding completedFeeding(String feedingId, String commandId) throws Exception {
+        return Feeding.parse(
+                new JSONObject()
+                        .put("command_id", commandId)
+                        .put("feeding_id", feedingId)
+                        .put("device_id", DEVICE_ID)
+                        .put("schedule_id", JSONObject.NULL)
+                        .put("source", "manual")
+                        .put("portion_grams", 40.0)
+                        .put("actual_grams", 39.5)
+                        .put("status", "completed")
+                        .put("created_at", "2026-11-24T10:00:00Z")
+                        .put("started_at", "2026-11-24T10:00:10Z")
+                        .put("finished_at", "2026-11-24T10:00:20Z")
+                        .put("error_code", JSONObject.NULL)
+                        .put("error_message", JSONObject.NULL),
+                DEVICE_ID
         );
     }
 }

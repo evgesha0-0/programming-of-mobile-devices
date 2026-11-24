@@ -53,6 +53,15 @@
             android:textAllCaps="false"
             android:visibility="gone" />
 
+        <Button
+            android:id="@+id/manual_feeding_check"
+            style="?android:attr/borderlessButtonStyle"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/manual_feeding_check"
+            android:textAllCaps="false"
+            android:visibility="gone" />
+
         <ProgressBar
             android:id="@+id/device_state_progress"
             android:layout_width="wrap_content"

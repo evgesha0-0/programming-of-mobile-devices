@@ -44,6 +44,14 @@
     <string name="manual_feeding_retry">Повторить ту же команду</string>
     <string name="manual_feeding_expired">Срок команды истёк. Создайте новую команду.</string>
     <string name="manual_feeding_rejected">Сервер отклонил команду кормления</string>
+    <string name="manual_feeding_pending">Команда принята и ожидает выполнения</string>
+    <string name="manual_feeding_running">Кормушка выдаёт корм</string>
+    <string name="manual_feeding_completed">Кормление выполнено, выдано %1$s г</string>
+    <string name="manual_feeding_failed">Кормление завершилось ошибкой: %1$s</string>
+    <string name="manual_feeding_result_expired">Команда не была выполнена до истечения срока</string>
+    <string name="manual_feeding_poll_retry">Не удалось обновить результат. Повторяем запрос…</string>
+    <string name="manual_feeding_poll_timeout">Автоматическая проверка остановлена. Результат можно проверить вручную.</string>
+    <string name="manual_feeding_check">Проверить результат</string>
     <string name="device_status_online">В сети</string>
     <string name="device_status_busy">Выполняет команду</string>
     <string name="device_status_error">Ошибка</string>

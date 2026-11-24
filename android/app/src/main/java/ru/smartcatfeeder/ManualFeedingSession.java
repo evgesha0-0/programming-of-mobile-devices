@@ -8,6 +8,7 @@ public final class ManualFeedingSession {
     private State state = State.IDLE;
     private ManualCommand command;
     private ManualCommandResponse acceptedResponse;
+    private Feeding currentFeeding;
 
     public State state() {
         return state;
@@ -16,6 +17,7 @@ public final class ManualFeedingSession {
     public void begin(ManualCommand command) {
         this.command = Objects.requireNonNull(command, "command");
         acceptedResponse = null;
+        currentFeeding = null;
         state = State.SENDING;
     }
 
@@ -36,7 +38,8 @@ public final class ManualFeedingSession {
             throw new IllegalArgumentException("Ответ относится к другой команде");
         }
         acceptedResponse = accepted;
-        state = State.ACCEPTED;
+        currentFeeding = accepted.feeding;
+        state = currentFeeding.terminal() ? State.FINISHED : State.ACCEPTED;
     }
 
     public ManualCommand retryCommand(Instant now) {
@@ -55,10 +58,28 @@ public final class ManualFeedingSession {
         return acceptedResponse;
     }
 
+    public Feeding currentFeeding() {
+        return currentFeeding;
+    }
+
+    public void updateFeeding(Feeding feeding) {
+        Feeding updated = Objects.requireNonNull(feeding, "feeding");
+        if (acceptedResponse == null
+                || !acceptedResponse.feeding.feedingId.equals(updated.feedingId)
+                || !acceptedResponse.feeding.deviceId.equals(updated.deviceId)
+                || !command.commandId.equals(updated.commandId)
+                || updated.source != Feeding.Source.MANUAL) {
+            throw new IllegalArgumentException("Получено состояние другого кормления");
+        }
+        currentFeeding = updated;
+        state = updated.terminal() ? State.FINISHED : State.ACCEPTED;
+    }
+
     public void clear() {
         state = State.IDLE;
         command = null;
         acceptedResponse = null;
+        currentFeeding = null;
     }
 
     private void requireCurrent(ManualCommand value) {
@@ -72,6 +93,7 @@ public final class ManualFeedingSession {
         IDLE,
         SENDING,
         RETRY_AVAILABLE,
-        ACCEPTED
+        ACCEPTED,
+        FINISHED
     }
 }
