@@ -4,6 +4,7 @@ import java.util.Objects;
 
 /** Держит полный набор подключения, включая токен, только в памяти процесса. */
 public final class ConnectionSession {
+    private final ManualFeedingSession manualFeedingSession = new ManualFeedingSession();
     private ConnectionSettings settings;
 
     public boolean isConnected() {
@@ -21,7 +22,12 @@ public final class ConnectionSession {
         return settings;
     }
 
+    public ManualFeedingSession manualFeedingSession() {
+        return manualFeedingSession;
+    }
+
     public void disconnect() {
         settings = null;
+        manualFeedingSession.clear();
     }
 }
