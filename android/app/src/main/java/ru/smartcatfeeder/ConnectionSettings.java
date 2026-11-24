@@ -8,6 +8,7 @@ import java.util.UUID;
 /** Проверенные параметры подключения Android-клиента к backend. */
 public final class ConnectionSettings {
     private static final String EMULATOR_HOST = "10.0.2.2";
+    private static final String USER_TOKEN_PATTERN = "usr_[A-Za-z0-9_-]{43}";
 
     public final String serverBaseUrl;
     public final String deviceId;
@@ -90,8 +91,10 @@ public final class ConnectionSettings {
 
     private static String validateAccessToken(String input) {
         String value = requireText(input, "Введите токен доступа");
-        if (value.chars().anyMatch(character -> character <= 0x1F || character == 0x7F)) {
-            throw new IllegalArgumentException("Токен доступа содержит недопустимые символы");
+        if (!value.matches(USER_TOKEN_PATTERN)) {
+            throw new IllegalArgumentException(
+                    "Введите пользовательский токен формата usr_…"
+            );
         }
         return value;
     }

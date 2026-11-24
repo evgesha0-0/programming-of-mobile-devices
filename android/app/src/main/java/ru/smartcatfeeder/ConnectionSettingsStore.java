@@ -8,7 +8,8 @@ import java.util.Objects;
 public final class ConnectionSettingsStore {
     private static final String SERVER_KEY = "server_base_url";
     private static final String DEVICE_KEY = "device_id";
-    private static final String VALIDATION_TOKEN = "not-persisted";
+    private static final String VALIDATION_TOKEN =
+            "usr_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 
     private final Backend backend;
     private final boolean allowLocalCleartext;

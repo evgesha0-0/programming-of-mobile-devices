@@ -9,13 +9,15 @@ import org.junit.Test;
 
 public final class ConnectionSessionTest {
     private static final String DEVICE_ID = "d6d174f4-e79f-49d1-9476-78bc99483752";
+    private static final String TOKEN =
+            "usr_0123456789012345678901234567890123456789012";
 
     @Test
     public void keepsValidatedConnectionOnlyInSessionObject() {
         ConnectionSettings settings = new ConnectionSettings(
                 "https://example.org",
                 DEVICE_ID,
-                "secret-token",
+                TOKEN,
                 false
         );
         ConnectionSession session = new ConnectionSession();
@@ -24,7 +26,7 @@ public final class ConnectionSessionTest {
 
         assertTrue(session.isConnected());
         assertEquals(settings, session.requireSettings());
-        assertEquals("secret-token", session.requireSettings().accessToken);
+        assertEquals(TOKEN, session.requireSettings().accessToken);
     }
 
     @Test
@@ -33,7 +35,7 @@ public final class ConnectionSessionTest {
         ConnectionSettings settings = new ConnectionSettings(
                 "https://example.org",
                 DEVICE_ID,
-                "secret-token",
+                TOKEN,
                 false
         );
         session.connect(settings);

@@ -9,6 +9,7 @@ import android.os.Bundle;
 import android.text.InputType;
 import android.view.LayoutInflater;
 import android.view.View;
+import android.view.WindowManager;
 import android.widget.Button;
 import android.widget.CheckBox;
 import android.widget.EditText;
@@ -108,6 +109,11 @@ public final class MainActivity extends Activity {
     }
 
     private void showScreen(AppScreen screen) {
+        if (screen == AppScreen.CONNECTION) {
+            getWindow().addFlags(WindowManager.LayoutParams.FLAG_SECURE);
+        } else {
+            getWindow().clearFlags(WindowManager.LayoutParams.FLAG_SECURE);
+        }
         cancelManualFeedingPolling();
         cancelScreenRequest();
         FrameLayout container = findViewById(R.id.screen_content);
@@ -313,6 +319,7 @@ public final class MainActivity extends Activity {
                 runOnUiThread(() -> showManualCommandRejected(
                         content,
                         command,
+                        error,
                         requestVersion
                 ));
             } catch (IOException error) {
@@ -344,12 +351,16 @@ public final class MainActivity extends Activity {
     private void showManualCommandRejected(
             View content,
             ManualCommand command,
+            IOException error,
             int requestVersion
     ) {
         if (!canApplyScreenResult(content, requestVersion, AppScreen.DEVICE_STATE)) {
             return;
         }
         sendingManualCommand = null;
+        if (handleAuthenticationFailure(error)) {
+            return;
+        }
         connectionSession.manualFeedingSession().markRejected(command);
         content.findViewById(R.id.manual_feeding_progress).setVisibility(View.GONE);
         content.findViewById(R.id.manual_feeding_retry).setVisibility(View.GONE);
@@ -505,7 +516,7 @@ public final class MainActivity extends Activity {
                         .getFeeding(current.feedingId);
                 runOnUiThread(() -> applyManualFeedingPollResult(content, updated, version));
             } catch (IOException error) {
-                runOnUiThread(() -> handleManualFeedingPollFailure(content, version));
+                runOnUiThread(() -> handleManualFeedingPollFailure(content, error, version));
             }
         }, delay.toMillis(), TimeUnit.MILLISECONDS);
     }
@@ -538,8 +549,15 @@ public final class MainActivity extends Activity {
         }
     }
 
-    private void handleManualFeedingPollFailure(View content, int version) {
+    private void handleManualFeedingPollFailure(
+            View content,
+            IOException error,
+            int version
+    ) {
         if (!canApplyManualFeedingPoll(content, version)) {
+            return;
+        }
+        if (handleAuthenticationFailure(error)) {
             return;
         }
         ManualFeedingSession session = connectionSession.manualFeedingSession();
@@ -619,7 +637,7 @@ public final class MainActivity extends Activity {
                 DeviceState state = new FeederRepository(settings).getDeviceState();
                 runOnUiThread(() -> showDeviceStateResult(content, state, requestVersion));
             } catch (IOException error) {
-                runOnUiThread(() -> showDeviceStateFailure(content, requestVersion));
+                runOnUiThread(() -> showDeviceStateFailure(content, error, requestVersion));
             }
         });
     }
@@ -655,8 +673,15 @@ public final class MainActivity extends Activity {
         content.findViewById(R.id.device_state_refresh).setEnabled(true);
     }
 
-    private void showDeviceStateFailure(View content, int requestVersion) {
+    private void showDeviceStateFailure(
+            View content,
+            IOException error,
+            int requestVersion
+    ) {
         if (!canApplyScreenResult(content, requestVersion, AppScreen.DEVICE_STATE)) {
+            return;
+        }
+        if (handleAuthenticationFailure(error)) {
             return;
         }
         content.findViewById(R.id.device_state_progress).setVisibility(View.GONE);
@@ -691,7 +716,7 @@ public final class MainActivity extends Activity {
                 ScheduleList schedules = new FeederRepository(settings).getSchedules();
                 runOnUiThread(() -> showSchedulesResult(content, schedules, requestVersion));
             } catch (IOException error) {
-                runOnUiThread(() -> showSchedulesFailure(content, requestVersion));
+                runOnUiThread(() -> showSchedulesFailure(content, error, requestVersion));
             }
         });
     }
@@ -753,8 +778,15 @@ public final class MainActivity extends Activity {
         list.addView(item);
     }
 
-    private void showSchedulesFailure(View content, int requestVersion) {
+    private void showSchedulesFailure(
+            View content,
+            IOException error,
+            int requestVersion
+    ) {
         if (!canApplyScreenResult(content, requestVersion, AppScreen.SCHEDULES)) {
+            return;
+        }
+        if (handleAuthenticationFailure(error)) {
             return;
         }
         content.findViewById(R.id.schedules_progress).setVisibility(View.GONE);
@@ -889,13 +921,24 @@ public final class MainActivity extends Activity {
                     loadSchedules(content);
                 });
             } catch (IOException error) {
-                runOnUiThread(() -> showScheduleMutationFailure(content, requestVersion));
+                runOnUiThread(() -> showScheduleMutationFailure(
+                        content,
+                        error,
+                        requestVersion
+                ));
             }
         });
     }
 
-    private void showScheduleMutationFailure(View content, int requestVersion) {
+    private void showScheduleMutationFailure(
+            View content,
+            IOException error,
+            int requestVersion
+    ) {
         if (!canApplyScreenResult(content, requestVersion, AppScreen.SCHEDULES)) {
+            return;
+        }
+        if (handleAuthenticationFailure(error)) {
             return;
         }
         content.findViewById(R.id.schedules_progress).setVisibility(View.GONE);
@@ -945,7 +988,12 @@ public final class MainActivity extends Activity {
                         requestVersion
                 ));
             } catch (IOException error) {
-                runOnUiThread(() -> showHistoryFailure(content, state, requestVersion));
+                runOnUiThread(() -> showHistoryFailure(
+                        content,
+                        state,
+                        error,
+                        requestVersion
+                ));
             }
         });
     }
@@ -1020,9 +1068,13 @@ public final class MainActivity extends Activity {
     private void showHistoryFailure(
             View content,
             FeedingHistoryState state,
+            IOException error,
             int requestVersion
     ) {
         if (!canApplyScreenResult(content, requestVersion, AppScreen.HISTORY)) {
+            return;
+        }
+        if (handleAuthenticationFailure(error)) {
             return;
         }
         content.findViewById(R.id.history_progress).setVisibility(View.GONE);
@@ -1061,6 +1113,21 @@ public final class MainActivity extends Activity {
                 && content.isAttachedToWindow()
                 && requestVersion == screenRequestVersion
                 && navigator.currentScreen() == expectedScreen;
+    }
+
+    private boolean handleAuthenticationFailure(IOException error) {
+        if (RepositoryFailurePolicy.actionFor(error)
+                != RepositoryFailurePolicy.Action.REAUTHENTICATE) {
+            return false;
+        }
+        connectionSession.disconnect();
+        Toast.makeText(
+                this,
+                R.string.connection_authentication_required,
+                Toast.LENGTH_LONG
+        ).show();
+        navigator.select(AppScreen.CONNECTION);
+        return true;
     }
 
     private void cancelScreenRequest() {

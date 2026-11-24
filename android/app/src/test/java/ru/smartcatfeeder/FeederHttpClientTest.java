@@ -24,6 +24,8 @@ import static org.junit.Assert.assertTrue;
 
 public final class FeederHttpClientTest {
     private static final String DEVICE_ID = "d6d174f4-e79f-49d1-9476-78bc99483752";
+    private static final String TOKEN =
+            "usr_0123456789012345678901234567890123456789012";
 
     @Test
     public void sendsExactAuthenticatedJsonRequest() throws Exception {
@@ -45,7 +47,7 @@ public final class FeederHttpClientTest {
                     "POST /api/v1/devices/" + DEVICE_ID + "/feeding-commands HTTP/1.1",
                     server.requestLine.get()
             );
-            assertTrue(server.headers.get().contains("Authorization: Bearer test-token"));
+            assertTrue(server.headers.get().contains("Authorization: Bearer " + TOKEN));
             assertTrue(server.headers.get().contains("Accept: application/json"));
             assertTrue(server.headers.get().contains("Content-Type: application/json; charset=utf-8"));
             assertEquals(body.toString(), server.requestBody.get());
@@ -183,7 +185,7 @@ public final class FeederHttpClientTest {
         return new FeederHttpClient(new ConnectionSettings(
                 server.address(),
                 DEVICE_ID,
-                "test-token",
+                TOKEN,
                 true
         ));
     }

@@ -18,6 +18,7 @@
     <string name="connection_save_error">Не удалось сохранить настройки подключения</string>
     <string name="connection_clear_error">Не удалось удалить сохранённые настройки</string>
     <string name="connection_required">Сначала настройте подключение</string>
+    <string name="connection_authentication_required">Токен недействителен или отозван. Введите новый токен.</string>
     <string name="screen_device_state_title">Кормушка</string>
     <string name="screen_device_state_placeholder">Здесь будет отображаться состояние кормушки</string>
     <string name="device_state_loading">Загрузка состояния кормушки</string>

@@ -10,6 +10,8 @@ import static org.junit.Assert.assertTrue;
 
 public final class ConnectionSettingsStoreTest {
     private static final String DEVICE_ID = "d6d174f4-e79f-49d1-9476-78bc99483752";
+    private static final String TOKEN =
+            "usr_0123456789012345678901234567890123456789012";
 
     @Test
     public void savesOnlyCanonicalServerAndDevice() {
@@ -18,7 +20,7 @@ public final class ConnectionSettingsStoreTest {
         ConnectionSettings settings = new ConnectionSettings(
                 "https://example.org/",
                 DEVICE_ID,
-                "secret-access-token",
+                TOKEN,
                 false
         );
 
@@ -89,7 +91,7 @@ public final class ConnectionSettingsStoreTest {
         ConnectionSettings settings = new ConnectionSettings(
                 "https://example.org",
                 DEVICE_ID,
-                "token",
+                TOKEN,
                 false
         );
 
