@@ -30,16 +30,30 @@ public final class ConnectionSessionTest {
     @Test
     public void disconnectRemovesFullConnection() {
         ConnectionSession session = new ConnectionSession();
-        session.connect(new ConnectionSettings(
+        ConnectionSettings settings = new ConnectionSettings(
                 "https://example.org",
                 DEVICE_ID,
                 "secret-token",
                 false
-        ));
+        );
+        session.connect(settings);
+        try {
+            session.manualFeedingSession().begin(ManualCommand.create(
+                    "1875723f-f6e1-4307-92c8-81577f1ea2fb",
+                    new java.math.BigDecimal("40"),
+                    java.time.Instant.parse("2026-11-24T10:05:00Z")
+            ));
+        } catch (org.json.JSONException error) {
+            throw new AssertionError(error);
+        }
 
         session.disconnect();
 
         assertFalse(session.isConnected());
+        assertEquals(
+                ManualFeedingSession.State.IDLE,
+                session.manualFeedingSession().state()
+        );
         assertThrows(IllegalStateException.class, session::requireSettings);
     }
 

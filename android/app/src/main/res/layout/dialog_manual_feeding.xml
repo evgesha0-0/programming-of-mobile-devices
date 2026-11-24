@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:padding="24dp">
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="@string/manual_feeding_description"
+        android:textAppearance="@style/TextAppearance.App.Body" />
+
+    <TextView
+        android:id="@+id/manual_portion_label"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="20dp"
+        android:labelFor="@id/manual_portion_input"
+        android:text="@string/manual_feeding_portion_label"
+        android:textColor="@color/text_primary"
+        android:textStyle="bold" />
+
+    <EditText
+        android:id="@+id/manual_portion_input"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:hint="@string/manual_feeding_portion_hint"
+        android:inputType="numberDecimal"
+        android:maxLines="1" />
+
+    <TextView
+        android:id="@+id/manual_feeding_validation_error"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:accessibilityLiveRegion="polite"
+        android:textColor="@color/error"
+        android:textStyle="bold"
+        android:visibility="gone" />
+
+</LinearLayout>

@@ -17,7 +17,9 @@ import android.widget.TimePicker;
 import android.widget.Toast;
 
 import java.io.IOException;
+import java.time.Instant;
 import java.time.ZoneId;
+import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -32,6 +34,7 @@ public final class MainActivity extends Activity {
     private ExecutorService networkExecutor;
     private Future<?> screenRequest;
     private int screenRequestVersion;
+    private ManualCommand sendingManualCommand;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -195,9 +198,201 @@ public final class MainActivity extends Activity {
         View content = LayoutInflater.from(this)
                 .inflate(R.layout.screen_device_state, container, false);
         container.addView(content);
+        content.findViewById(R.id.manual_feeding_button)
+                .setOnClickListener(view -> showManualFeedingDialog(content));
+        content.findViewById(R.id.manual_feeding_retry)
+                .setOnClickListener(view -> retryManualFeeding(content));
         content.findViewById(R.id.device_state_refresh)
                 .setOnClickListener(view -> loadDeviceState(content));
+        renderManualFeedingState(content);
         loadDeviceState(content);
+    }
+
+    private void showManualFeedingDialog(View content) {
+        View form = LayoutInflater.from(this)
+                .inflate(R.layout.dialog_manual_feeding, null, false);
+        EditText portion = form.findViewById(R.id.manual_portion_input);
+        TextView error = form.findViewById(R.id.manual_feeding_validation_error);
+        AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle(R.string.manual_feeding_title)
+                .setView(form)
+                .setPositiveButton(R.string.manual_feeding_continue, null)
+                .setNegativeButton(R.string.manual_feeding_cancel, null)
+                .create();
+        dialog.setOnShowListener(ignored -> dialog.getButton(AlertDialog.BUTTON_POSITIVE)
+                .setOnClickListener(view -> {
+                    ManualCommand command;
+                    try {
+                        command = ManualCommandInput.create(
+                                portion.getText().toString(),
+                                Instant.now(),
+                                UUID.randomUUID()
+                        );
+                    } catch (IllegalArgumentException validationError) {
+                        error.setText(validationError.getMessage());
+                        error.setVisibility(View.VISIBLE);
+                        return;
+                    }
+                    dialog.dismiss();
+                    confirmManualFeeding(content, command);
+                }));
+        dialog.show();
+    }
+
+    private void confirmManualFeeding(View content, ManualCommand command) {
+        String portion = command.portionGrams.stripTrailingZeros().toPlainString();
+        new AlertDialog.Builder(this)
+                .setTitle(R.string.manual_feeding_confirm_title)
+                .setMessage(getString(R.string.manual_feeding_confirm_message, portion))
+                .setPositiveButton(
+                        R.string.manual_feeding_confirm_action,
+                        (dialog, which) -> sendManualCommand(content, command)
+                )
+                .setNegativeButton(R.string.manual_feeding_cancel, null)
+                .show();
+    }
+
+    private void retryManualFeeding(View content) {
+        ManualCommand command = connectionSession.manualFeedingSession()
+                .retryCommand(Instant.now());
+        if (command == null) {
+            showManualFeedingMessage(
+                    content,
+                    R.string.manual_feeding_expired,
+                    R.color.error
+            );
+            content.findViewById(R.id.manual_feeding_retry).setVisibility(View.GONE);
+            content.findViewById(R.id.manual_feeding_button).setEnabled(true);
+            return;
+        }
+        sendManualCommand(content, command);
+    }
+
+    private void sendManualCommand(View content, ManualCommand command) {
+        cancelScreenRequest();
+        ManualFeedingSession session = connectionSession.manualFeedingSession();
+        session.begin(command);
+        sendingManualCommand = command;
+        renderManualFeedingState(content);
+
+        int requestVersion = ++screenRequestVersion;
+        ConnectionSettings settings = connectionSession.requireSettings();
+        screenRequest = networkExecutor.submit(() -> {
+            try {
+                ManualCommandResponse response = new FeederRepository(settings)
+                        .createManualCommand(command);
+                runOnUiThread(() -> showManualCommandAccepted(
+                        content,
+                        command,
+                        response,
+                        requestVersion
+                ));
+            } catch (FeederHttpClient.ApiException error) {
+                runOnUiThread(() -> showManualCommandRejected(
+                        content,
+                        command,
+                        requestVersion
+                ));
+            } catch (IOException error) {
+                runOnUiThread(() -> showManualCommandUncertain(
+                        content,
+                        command,
+                        requestVersion
+                ));
+            }
+        });
+    }
+
+    private void showManualCommandAccepted(
+            View content,
+            ManualCommand command,
+            ManualCommandResponse response,
+            int requestVersion
+    ) {
+        if (!canApplyScreenResult(content, requestVersion, AppScreen.DEVICE_STATE)) {
+            return;
+        }
+        sendingManualCommand = null;
+        connectionSession.manualFeedingSession().markAccepted(command, response);
+        renderManualFeedingState(content);
+        loadDeviceState(content);
+    }
+
+    private void showManualCommandRejected(
+            View content,
+            ManualCommand command,
+            int requestVersion
+    ) {
+        if (!canApplyScreenResult(content, requestVersion, AppScreen.DEVICE_STATE)) {
+            return;
+        }
+        sendingManualCommand = null;
+        connectionSession.manualFeedingSession().markRejected(command);
+        content.findViewById(R.id.manual_feeding_progress).setVisibility(View.GONE);
+        content.findViewById(R.id.manual_feeding_retry).setVisibility(View.GONE);
+        content.findViewById(R.id.manual_feeding_button).setEnabled(true);
+        showManualFeedingMessage(
+                content,
+                R.string.manual_feeding_rejected,
+                R.color.error
+        );
+    }
+
+    private void showManualCommandUncertain(
+            View content,
+            ManualCommand command,
+            int requestVersion
+    ) {
+        if (!canApplyScreenResult(content, requestVersion, AppScreen.DEVICE_STATE)) {
+            return;
+        }
+        sendingManualCommand = null;
+        connectionSession.manualFeedingSession().markUncertain(command);
+        renderManualFeedingState(content);
+    }
+
+    private void renderManualFeedingState(View content) {
+        ManualFeedingSession.State state = connectionSession.manualFeedingSession().state();
+        View progress = content.findViewById(R.id.manual_feeding_progress);
+        View retry = content.findViewById(R.id.manual_feeding_retry);
+        View start = content.findViewById(R.id.manual_feeding_button);
+
+        progress.setVisibility(state == ManualFeedingSession.State.SENDING
+                ? View.VISIBLE
+                : View.GONE);
+        retry.setVisibility(state == ManualFeedingSession.State.RETRY_AVAILABLE
+                ? View.VISIBLE
+                : View.GONE);
+        start.setEnabled(state == ManualFeedingSession.State.IDLE);
+
+        if (state == ManualFeedingSession.State.ACCEPTED) {
+            showManualFeedingMessage(
+                    content,
+                    R.string.manual_feeding_accepted,
+                    R.color.status_online
+            );
+        } else if (state == ManualFeedingSession.State.RETRY_AVAILABLE) {
+            showManualFeedingMessage(
+                    content,
+                    R.string.manual_feeding_uncertain,
+                    R.color.error
+            );
+        } else if (state == ManualFeedingSession.State.SENDING) {
+            showManualFeedingMessage(
+                    content,
+                    R.string.manual_feeding_sending,
+                    R.color.text_secondary
+            );
+        } else {
+            content.findViewById(R.id.manual_feeding_message).setVisibility(View.GONE);
+        }
+    }
+
+    private void showManualFeedingMessage(View content, int textResource, int colorResource) {
+        TextView message = content.findViewById(R.id.manual_feeding_message);
+        message.setText(textResource);
+        message.setTextColor(getColor(colorResource));
+        message.setVisibility(View.VISIBLE);
     }
 
     private void loadDeviceState(View content) {
@@ -661,6 +856,10 @@ public final class MainActivity extends Activity {
 
     private void cancelScreenRequest() {
         screenRequestVersion++;
+        if (sendingManualCommand != null) {
+            connectionSession.manualFeedingSession().markUncertain(sendingManualCommand);
+            sendingManualCommand = null;
+        }
         if (screenRequest != null) {
             screenRequest.cancel(true);
             screenRequest = null;

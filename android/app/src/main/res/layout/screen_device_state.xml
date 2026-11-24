@@ -15,6 +15,44 @@
             android:text="@string/screen_device_state_title"
             android:textAppearance="@style/TextAppearance.App.Title" />
 
+        <Button
+            android:id="@+id/manual_feeding_button"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
+            android:text="@string/manual_feeding_button"
+            android:textAllCaps="false" />
+
+        <ProgressBar
+            android:id="@+id/manual_feeding_progress"
+            style="?android:attr/progressBarStyleSmall"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center_horizontal"
+            android:layout_marginTop="12dp"
+            android:contentDescription="@string/manual_feeding_sending"
+            android:visibility="gone" />
+
+        <TextView
+            android:id="@+id/manual_feeding_message"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:accessibilityLiveRegion="polite"
+            android:gravity="center"
+            android:textColor="@color/text_secondary"
+            android:textStyle="bold"
+            android:visibility="gone" />
+
+        <Button
+            android:id="@+id/manual_feeding_retry"
+            style="?android:attr/borderlessButtonStyle"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/manual_feeding_retry"
+            android:textAllCaps="false"
+            android:visibility="gone" />
+
         <ProgressBar
             android:id="@+id/device_state_progress"
             android:layout_width="wrap_content"
