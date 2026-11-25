@@ -933,6 +933,101 @@ test('manual command repository creates command and feeding atomically with idem
   })).kind, 'conflict');
 });
 
+test('feeding reads expire only pending manual commands', async (t) => {
+  const db = new PGlite(); t.after(() => db.close()); await runMigrations(client(db));
+  const detailsDeviceId = await device(db);
+  const historyDeviceId = await device(db);
+  const commandRepository = createCommandRepository(transactionalDatabase(db));
+  const feedingRepository = createFeedingRepository(transactionalDatabase(db));
+  const detailsCommandId = randomUUID();
+  const detailsFeedingId = randomUUID();
+  const runningCommandId = randomUUID();
+  const runningFeedingId = randomUUID();
+  const historyCommandId = randomUUID();
+  const historyFeedingId = randomUUID();
+
+  for (const values of [
+    {
+      commandId: detailsCommandId,
+      feedingId: detailsFeedingId,
+      deviceId: detailsDeviceId,
+      portionGrams: 30,
+    },
+    {
+      commandId: runningCommandId,
+      feedingId: runningFeedingId,
+      deviceId: detailsDeviceId,
+      portionGrams: 35,
+    },
+    {
+      commandId: historyCommandId,
+      feedingId: historyFeedingId,
+      deviceId: historyDeviceId,
+      portionGrams: 40,
+    },
+  ]) {
+    assert.equal((await commandRepository.create({
+      ...values,
+      createdAt: new Date('2000-04-01T00:00:00Z'),
+      expiresAt: new Date('2000-04-01T00:05:00Z'),
+    })).kind, 'created');
+  }
+
+  const startedAt = new Date('2000-04-01T00:01:00Z');
+  await db.query(
+    "UPDATE feeding_commands SET status = 'running', started_at = $2 WHERE command_id = $1",
+    [runningCommandId, startedAt],
+  );
+  await db.query(
+    "UPDATE feedings SET status = 'running', started_at = $2 WHERE feeding_id = $1",
+    [runningFeedingId, startedAt],
+  );
+
+  const details = await feedingRepository.find(detailsDeviceId, detailsFeedingId);
+  assert.equal(details?.status, 'expired');
+  assert.ok(details?.finishedAt);
+  const running = await feedingRepository.find(detailsDeviceId, runningFeedingId);
+  assert.equal(running?.status, 'running');
+  assert.equal(running?.finishedAt, null);
+
+  const history = await feedingRepository.list(historyDeviceId, 10, null);
+  assert.equal(history?.items[0]?.feedingId, historyFeedingId);
+  assert.equal(history?.items[0]?.status, 'expired');
+  assert.ok(history?.items[0]?.finishedAt);
+
+  const statuses = await db.query<{
+    command_id: string;
+    command_status: string;
+    feeding_status: string;
+  }>(
+    `SELECT
+       c.command_id,
+       c.status AS command_status,
+       f.status AS feeding_status
+     FROM feeding_commands AS c
+     JOIN feedings AS f ON f.feeding_id = c.feeding_id
+     WHERE c.command_id IN ($1, $2, $3)`,
+    [detailsCommandId, runningCommandId, historyCommandId],
+  );
+  const byCommandId = new Map(statuses.rows.map((row) => [row.command_id, row]));
+  assert.deepEqual(
+    [
+      byCommandId.get(detailsCommandId)?.command_status,
+      byCommandId.get(detailsCommandId)?.feeding_status,
+      byCommandId.get(historyCommandId)?.command_status,
+      byCommandId.get(historyCommandId)?.feeding_status,
+    ],
+    ['expired', 'expired', 'expired', 'expired'],
+  );
+  assert.deepEqual(
+    [
+      byCommandId.get(runningCommandId)?.command_status,
+      byCommandId.get(runningCommandId)?.feeding_status,
+    ],
+    ['running', 'running'],
+  );
+});
+
 test('scheduled feeding repository accepts offline events idempotently', async (t) => {
   const db = new PGlite(); t.after(() => db.close()); await runMigrations(client(db));
   const deviceId = await device(db);

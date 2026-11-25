@@ -73,6 +73,7 @@ interface FeedingDetailsRow extends FeedingHistoryRow {
 export function createFeedingRepository(database: FeedingDatabase): FeedingRepository {
   return {
     async find(deviceId, feedingId) {
+      await expirePendingManualFeedings(database, deviceId);
       const result = await database.query<FeedingDetailsRow>(
         `SELECT
            feeding_id,
@@ -102,6 +103,8 @@ export function createFeedingRepository(database: FeedingDatabase): FeedingRepos
         [deviceId],
       );
       if (device.rows.length === 0) return null;
+
+      await expirePendingManualFeedings(database, deviceId);
 
       const cursorCondition = cursor
         ? 'AND (created_at, feeding_id) < ($2::timestamptz, $3)'
@@ -227,6 +230,29 @@ export function createFeedingRepository(database: FeedingDatabase): FeedingRepos
       }
     },
   };
+}
+
+async function expirePendingManualFeedings(
+  database: QueryExecutor,
+  deviceId: string,
+): Promise<void> {
+  await database.query(
+    `WITH expired AS (
+       UPDATE feeding_commands AS command
+       SET status = 'expired', finished_at = now()
+       WHERE command.device_id = $1
+         AND command.status = 'pending'
+         AND command.expires_at <= now()
+       RETURNING command.device_id, command.feeding_id, command.finished_at
+     )
+     UPDATE feedings AS feeding
+     SET status = 'expired', finished_at = expired.finished_at
+     FROM expired
+     WHERE feeding.device_id = expired.device_id
+       AND feeding.feeding_id = expired.feeding_id
+       AND feeding.status = 'pending'`,
+    [deviceId],
+  );
 }
 
 function toHistoryItem(row: FeedingHistoryRow): FeedingHistoryItemRecord {
