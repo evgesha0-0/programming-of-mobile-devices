@@ -73,7 +73,7 @@ interface FeedingDetailsRow extends FeedingHistoryRow {
 export function createFeedingRepository(database: FeedingDatabase): FeedingRepository {
   return {
     async find(deviceId, feedingId) {
-      await expirePendingManualFeedings(database, deviceId);
+      await expirePendingManualFeedings(database, deviceId, feedingId);
       const result = await database.query<FeedingDetailsRow>(
         `SELECT
            feeding_id,
@@ -235,7 +235,9 @@ export function createFeedingRepository(database: FeedingDatabase): FeedingRepos
 async function expirePendingManualFeedings(
   database: QueryExecutor,
   deviceId: string,
+  feedingId?: string,
 ): Promise<void> {
+  const feedingCondition = feedingId ? 'AND command.feeding_id = $2' : '';
   await database.query(
     `WITH expired AS (
        UPDATE feeding_commands AS command
@@ -243,6 +245,7 @@ async function expirePendingManualFeedings(
        WHERE command.device_id = $1
          AND command.status = 'pending'
          AND command.expires_at <= now()
+         ${feedingCondition}
        RETURNING command.device_id, command.feeding_id, command.finished_at
      )
      UPDATE feedings AS feeding
@@ -251,7 +254,7 @@ async function expirePendingManualFeedings(
      WHERE feeding.device_id = expired.device_id
        AND feeding.feeding_id = expired.feeding_id
        AND feeding.status = 'pending'`,
-    [deviceId],
+    feedingId ? [deviceId, feedingId] : [deviceId],
   );
 }
 

@@ -1,3 +1,5 @@
+export const MAX_MANUAL_COMMAND_TTL_MS = 15 * 60 * 1_000;
+
 export type FeedingStatus = 'pending' | 'running' | 'completed' | 'failed' | 'expired';
 
 export interface ManualCommandRecord {

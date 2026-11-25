@@ -8,6 +8,7 @@ import test from 'node:test';
 import { PGlite } from '@electric-sql/pglite';
 
 import { createCommandRepository, type CommandDatabase } from '../src/commands/command.repository.js';
+import { MAX_MANUAL_COMMAND_TTL_MS } from '../src/commands/command.types.js';
 import { createDeviceAuthenticationRepository } from '../src/authentication/device-authentication.repository.js';
 import { createUserAuthenticationRepository } from '../src/authentication/user-authentication.repository.js';
 import { loadMigrations, runMigrations, type Migration, type MigrationConnection } from '../src/db/migrations.js';
@@ -587,6 +588,49 @@ test('schedule repository changes rows and device revision in one transaction', 
   assert.equal(await repository.sync(randomUUID()), null);
 });
 
+test('manual command repository enforces expiry boundaries and maximum lifetime', async (t) => {
+  const db = new PGlite(); t.after(() => db.close()); await runMigrations(client(db));
+  const deviceId = await device(db);
+  const repository = createCommandRepository(transactionalDatabase(db));
+  const createdAt = new Date('2090-01-01T00:00:00Z');
+  assert.equal(MAX_MANUAL_COMMAND_TTL_MS, 15 * 60_000);
+
+  assert.equal((await repository.create({
+    commandId: randomUUID(),
+    feedingId: randomUUID(),
+    deviceId,
+    portionGrams: 40,
+    createdAt,
+    expiresAt: new Date(createdAt.getTime() + 1),
+  })).kind, 'created');
+  assert.equal((await repository.create({
+    commandId: randomUUID(),
+    feedingId: randomUUID(),
+    deviceId,
+    portionGrams: 40,
+    createdAt,
+    expiresAt: new Date(createdAt.getTime() + MAX_MANUAL_COMMAND_TTL_MS),
+  })).kind, 'created');
+  for (const expiresAt of [
+    createdAt,
+    new Date(createdAt.getTime() + MAX_MANUAL_COMMAND_TTL_MS + 1),
+  ]) {
+    const commandId = randomUUID();
+    assert.equal((await repository.create({
+      commandId,
+      feedingId: randomUUID(),
+      deviceId,
+      portionGrams: 40,
+      createdAt,
+      expiresAt,
+    })).kind, 'invalid_expiry');
+    assert.equal((await db.query(
+      'SELECT command_id FROM feeding_commands WHERE command_id = $1',
+      [commandId],
+    )).rows.length, 0);
+  }
+});
+
 test('manual command repository creates command and feeding atomically with idempotency', async (t) => {
   const db = new PGlite(); t.after(() => db.close()); await runMigrations(client(db));
   const deviceId = await device(db);
@@ -623,6 +667,10 @@ test('manual command repository creates command and feeding atomically with idem
   assert.equal((await repository.create({ ...values, deviceId: otherDeviceId })).kind, 'conflict');
   assert.equal((await repository.create({
     ...values,
+    expiresAt: new Date(values.expiresAt.getTime() + 1),
+  })).kind, 'conflict');
+  assert.equal((await repository.create({
+    ...values,
     commandId: randomUUID(),
     feedingId: randomUUID(),
     createdAt: values.expiresAt,
@@ -655,7 +703,7 @@ test('manual command repository creates command and feeding atomically with idem
     deviceId: queueDeviceId,
     portionGrams: 35,
     createdAt: new Date('2090-01-01T00:00:00Z'),
-    expiresAt: new Date('2099-01-01T00:05:00Z'),
+    expiresAt: new Date('2090-01-01T00:05:00Z'),
   });
   await repository.create({
     commandId: secondPendingCommandId,
@@ -663,7 +711,7 @@ test('manual command repository creates command and feeding atomically with idem
     deviceId: queueDeviceId,
     portionGrams: 45,
     createdAt: new Date('2090-01-01T00:00:01Z'),
-    expiresAt: new Date('2099-01-01T00:05:00Z'),
+    expiresAt: new Date('2090-01-01T00:05:00Z'),
   });
   await repository.create({
     commandId: otherDeviceCommandId,
@@ -726,7 +774,7 @@ test('manual command repository creates command and feeding atomically with idem
     deviceId: ackDeviceId,
     portionGrams: 40,
     createdAt: new Date('2090-01-01T00:00:00Z'),
-    expiresAt: new Date('2099-01-01T00:05:00Z'),
+    expiresAt: new Date('2090-01-01T00:05:00Z'),
   });
   const acknowledgment = {
     commandId: ackCommandId,
@@ -776,7 +824,7 @@ test('manual command repository creates command and feeding atomically with idem
     deviceId: ackDeviceId,
     portionGrams: 25,
     createdAt: new Date('2090-02-01T00:00:00Z'),
-    expiresAt: new Date('2099-02-01T00:05:00Z'),
+    expiresAt: new Date('2090-02-01T00:05:00Z'),
   });
   assert.equal((await repository.acknowledge({
     commandId: invalidStartedCommandId,
@@ -784,6 +832,18 @@ test('manual command repository creates command and feeding atomically with idem
     deviceId: ackDeviceId,
     startedAt: new Date('2090-01-31T23:59:59Z'),
   })).kind, 'invalid_started_at');
+  assert.equal((await repository.acknowledge({
+    commandId: invalidStartedCommandId,
+    feedingId: invalidStartedFeedingId,
+    deviceId: ackDeviceId,
+    startedAt: new Date('2090-02-01T00:05:00Z'),
+  })).kind, 'invalid_started_at');
+  assert.equal((await repository.acknowledge({
+    commandId: invalidStartedCommandId,
+    feedingId: invalidStartedFeedingId,
+    deviceId: ackDeviceId,
+    startedAt: new Date('2090-02-01T00:04:59.999Z'),
+  })).kind, 'acknowledged');
 
   const expiredAckCommandId = randomUUID();
   const expiredAckFeedingId = randomUUID();
@@ -810,6 +870,16 @@ test('manual command repository creates command and feeding atomically with idem
   );
   assert.equal(expiredAckRows.rows[0]?.command_status, 'expired');
   assert.equal(expiredAckRows.rows[0]?.feeding_status, 'expired');
+  const repeatedExpired = await repository.create({
+    commandId: expiredAckCommandId,
+    feedingId: randomUUID(),
+    deviceId: ackDeviceId,
+    portionGrams: 20,
+    createdAt: new Date('2090-01-01T00:00:00Z'),
+    expiresAt: new Date('2000-02-01T00:05:00Z'),
+  });
+  assert.equal(repeatedExpired.kind, 'repeated');
+  assert.equal(repeatedExpired.kind === 'repeated' && repeatedExpired.command.status, 'expired');
   assert.equal((await repository.acknowledge({
     ...acknowledgment,
     commandId: randomUUID(),
@@ -824,7 +894,7 @@ test('manual command repository creates command and feeding atomically with idem
     actualGrams: 39.5,
     status: 'completed' as const,
     startedAt: acknowledgment.startedAt,
-    finishedAt: new Date('2090-01-01T00:00:20Z'),
+    finishedAt: new Date('2090-01-01T00:05:30Z'),
     errorCode: null,
     errorMessage: null,
   };
@@ -873,7 +943,7 @@ test('manual command repository creates command and feeding atomically with idem
     deviceId: ackDeviceId,
     portionGrams: 25,
     createdAt: new Date('2090-03-01T00:00:00Z'),
-    expiresAt: new Date('2099-03-01T00:05:00Z'),
+    expiresAt: new Date('2090-03-01T00:05:00Z'),
   });
   await repository.acknowledge({
     commandId: failedCommandId,

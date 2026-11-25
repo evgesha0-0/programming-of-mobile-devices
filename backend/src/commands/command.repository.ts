@@ -1,6 +1,7 @@
 import type { QueryResultRow } from 'pg';
 
 import type { QueryExecutor } from '../devices/device.repository.js';
+import { MAX_MANUAL_COMMAND_TTL_MS } from './command.types.js';
 import type {
   AcknowledgeCommandResult,
   AcknowledgeCommandValues,
@@ -112,7 +113,12 @@ export function createCommandRepository(database: CommandDatabase): CommandRepos
             : { kind: 'conflict' };
         }
 
-        if (values.expiresAt <= values.createdAt) {
+        const lifetimeMs = values.expiresAt.getTime() - values.createdAt.getTime();
+        if (
+          !Number.isFinite(lifetimeMs)
+          || lifetimeMs <= 0
+          || lifetimeMs > MAX_MANUAL_COMMAND_TTL_MS
+        ) {
           await client.query('COMMIT');
           return { kind: 'invalid_expiry' };
         }
@@ -298,7 +304,8 @@ export function createCommandRepository(database: CommandDatabase): CommandRepos
           return { kind: 'conflict' };
         }
 
-        if (toDate(row.expires_at) <= toDate(row.server_time)) {
+        const expiresAt = toDate(row.expires_at);
+        if (expiresAt <= toDate(row.server_time)) {
           await client.query(
             `UPDATE feeding_commands
              SET status = 'expired', finished_at = now()
@@ -315,7 +322,7 @@ export function createCommandRepository(database: CommandDatabase): CommandRepos
           return { kind: 'conflict' };
         }
 
-        if (values.startedAt < toDate(row.created_at)) {
+        if (values.startedAt < toDate(row.created_at) || values.startedAt >= expiresAt) {
           await client.query('COMMIT');
           return { kind: 'invalid_started_at' };
         }

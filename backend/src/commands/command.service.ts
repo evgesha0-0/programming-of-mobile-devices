@@ -2,8 +2,11 @@ import { randomUUID } from 'node:crypto';
 
 import { ConflictError, NotFoundError } from '../utils/http-error.js';
 import type { CommandRepository } from './command.repository.js';
+import { MAX_MANUAL_COMMAND_TTL_MS } from './command.types.js';
 import type { ManualCommandRecord, PendingCommandRecord } from './command.types.js';
 import type { ManualResultStatus } from './command.types.js';
+
+const MAX_MANUAL_COMMAND_TTL_MINUTES = MAX_MANUAL_COMMAND_TTL_MS / 60_000;
 
 export interface CreateManualCommandInput {
   command_id: string;
@@ -232,18 +235,24 @@ function toPendingResponse(command: PendingCommandRecord): PendingCommandRespons
 }
 
 class InvalidExpiryError extends Error {
-  readonly validation = [{ instancePath: '/expires_at', message: 'must be in the future' }];
+  readonly validation = [{
+    instancePath: '/expires_at',
+    message: `must be in the future and no more than ${MAX_MANUAL_COMMAND_TTL_MINUTES} minutes after creation`,
+  }];
 
   constructor() {
-    super('Поле expires_at должно быть позже времени создания команды');
+    super(`Поле expires_at должно быть позже времени создания и не более чем на ${MAX_MANUAL_COMMAND_TTL_MINUTES} минут`);
   }
 }
 
 class InvalidStartedAtError extends Error {
-  readonly validation = [{ instancePath: '/started_at', message: 'must not precede command creation' }];
+  readonly validation = [{
+    instancePath: '/started_at',
+    message: 'must be within the command lifetime',
+  }];
 
   constructor() {
-    super('Поле started_at не может быть раньше времени создания команды');
+    super('Поле started_at должно быть не раньше создания и раньше expires_at');
   }
 }
 
