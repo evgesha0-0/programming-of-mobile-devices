@@ -11,15 +11,25 @@ const UUID_PATTERN = new RegExp(
   'i',
 );
 
-export interface IssuedUserOwnerCredential {
+export interface IssuedUserCredential {
   userId: string;
   userToken: string;
+}
+
+export interface IssuedUserOwnerCredential extends IssuedUserCredential {
   deviceId: string;
   role: 'owner';
 }
 
+export interface RevokedUserCredential {
+  userId: string;
+  revoked: boolean;
+}
+
 export interface UserProvisioningService {
   provisionOwner(deviceId: string): Promise<IssuedUserOwnerCredential>;
+  rotateUserToken(userId: string): Promise<IssuedUserCredential>;
+  revokeUserToken(userId: string): Promise<RevokedUserCredential>;
 }
 
 export interface UserProvisioningRandom {
@@ -44,6 +54,13 @@ export class UserProvisioningDeviceNotFoundError extends Error {
 export class UserProvisioningOwnerExistsError extends Error {
   constructor(deviceId: string) {
     super(`Device ${deviceId} already has an active owner`);
+    this.name = new.target.name;
+  }
+}
+
+export class UserProvisioningUserNotFoundError extends Error {
+  constructor(userId: string) {
+    super(`User ${userId} was not found`);
     this.name = new.target.name;
   }
 }
@@ -79,6 +96,24 @@ export function createUserProvisioningService(
         role: 'owner',
       };
     },
+
+    async rotateUserToken(userId) {
+      validateUserId(userId);
+      const issued = issueCredential(random);
+      if (!await repository.rotateCredential(userId, issued.credential)) {
+        throw new UserProvisioningUserNotFoundError(userId);
+      }
+      return { userId, userToken: issued.userToken };
+    },
+
+    async revokeUserToken(userId) {
+      validateUserId(userId);
+      const result = await repository.revokeCredential(userId);
+      if (result === 'user_not_found') {
+        throw new UserProvisioningUserNotFoundError(userId);
+      }
+      return { userId, revoked: result === 'revoked' };
+    },
   };
 }
 
@@ -105,5 +140,11 @@ function issueCredential(random: UserProvisioningRandom): {
 function validateDeviceId(deviceId: string): void {
   if (!UUID_PATTERN.test(deviceId)) {
     throw new UserProvisioningValidationError('Device ID must be a UUID');
+  }
+}
+
+function validateUserId(userId: string): void {
+  if (!UUID_PATTERN.test(userId)) {
+    throw new UserProvisioningValidationError('User ID must be a UUID');
   }
 }

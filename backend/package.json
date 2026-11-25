@@ -22,6 +22,10 @@
     "device:revoke-token:production": "node dist/provisioning/device-provisioning.cli.js revoke",
     "user:provision-owner": "tsx src/provisioning/user-provisioning.cli.ts provision-owner",
     "user:provision-owner:production": "node dist/provisioning/user-provisioning.cli.js provision-owner",
+    "user:rotate-token": "tsx src/provisioning/user-provisioning.cli.ts rotate",
+    "user:rotate-token:production": "node dist/provisioning/user-provisioning.cli.js rotate",
+    "user:revoke-token": "tsx src/provisioning/user-provisioning.cli.ts revoke",
+    "user:revoke-token:production": "node dist/provisioning/user-provisioning.cli.js revoke",
     "test:provisioning": "tsx --test --test-concurrency=1 tests/user-provisioning.test.ts",
     "typecheck": "tsc -p tsconfig.check.json",
     "test": "tsx --test --test-concurrency=1 tests/**/*.test.ts"

@@ -11,6 +11,8 @@ import {
   createUserProvisioningRepository,
   type NewOwnerValues,
   type ProvisionOwnerResult,
+  type RevokeUserCredentialResult,
+  type UserCredentialValues,
   type UserProvisioningDatabase,
   type UserProvisioningRepository,
 } from '../src/provisioning/user-provisioning.repository.js';
@@ -18,14 +20,21 @@ import {
   createUserProvisioningService,
   UserProvisioningDeviceNotFoundError,
   UserProvisioningOwnerExistsError,
+  UserProvisioningUserNotFoundError,
   UserProvisioningValidationError,
   type UserProvisioningRandom,
 } from '../src/provisioning/user-provisioning.service.js';
+import { HttpError } from '../src/utils/http-error.js';
 
 const deviceId = 'd6d174f4-e79f-49d1-9476-78bc99483752';
+const otherDeviceId = '4d6b9594-9278-4621-88f3-876b3d127fd8';
 const credentialId = '1875723f-f6e1-4307-92c8-81577f1ea2fb';
+const rotatedCredentialId = 'a136eb7a-c8a3-4d31-a25c-f61337241f6c';
 const userId = 'fcba4f1c-7cf2-43de-b60f-97be27b5b7dc';
 const userDeviceId = '723fb100-1524-44e4-8b0a-b91fc6eb0964';
+const secondCredentialId = '2b3ecbf9-4885-4368-93ee-7b6151406bc5';
+const secondUserId = 'f1467e18-c6da-40f9-8cef-7582e56e0940';
+const secondUserDeviceId = 'dca8de88-3071-44c6-adb8-c00c783ef585';
 
 test('owner provisioning returns usr token once and stores only its hash', async () => {
   const storage = memoryRepository();
@@ -79,6 +88,46 @@ test('owner provisioning validates IDs and maps repository outcomes', async () =
   ).provisionOwner(deviceId), UserProvisioningOwnerExistsError);
 });
 
+test('user token lifecycle validates IDs and maps repository outcomes', async () => {
+  const storage = memoryRepository();
+  const invalidService = createUserProvisioningService(
+    storage,
+    deterministicRandom([rotatedCredentialId], 8),
+  );
+
+  await assert.rejects(invalidService.rotateUserToken('not-a-uuid'), UserProvisioningValidationError);
+  await assert.rejects(invalidService.revokeUserToken('not-a-uuid'), UserProvisioningValidationError);
+  assert.equal(storage.rotated.length, 0);
+  assert.equal(storage.revoked.length, 0);
+
+  const rotated = await createUserProvisioningService(
+    storage,
+    deterministicRandom([rotatedCredentialId], 12),
+  ).rotateUserToken(userId);
+  assert.equal(rotated.userId, userId);
+  assert.match(rotated.userToken, /^usr_[A-Za-z0-9_-]{43}$/);
+  const expectedHash = createHash('sha256').update(rotated.userToken, 'utf8').digest();
+  assert.deepEqual(storage.rotated[0]?.credential.tokenHash, expectedHash);
+
+  storage.rotateResult = false;
+  await assert.rejects(createUserProvisioningService(
+    storage,
+    deterministicRandom(['56450151-4fb9-453a-a459-3f1bed2f821b'], 13),
+  ).rotateUserToken(userId), UserProvisioningUserNotFoundError);
+
+  storage.revokeResult = 'user_not_found';
+  await assert.rejects(createUserProvisioningService(
+    storage,
+    deterministicRandom([], 14),
+  ).revokeUserToken(userId), UserProvisioningUserNotFoundError);
+
+  storage.revokeResult = 'revoked';
+  const service = createUserProvisioningService(storage, deterministicRandom([], 15));
+  assert.deepEqual(await service.revokeUserToken(userId), { userId, revoked: true });
+  storage.revokeResult = 'already_revoked';
+  assert.deepEqual(await service.revokeUserToken(userId), { userId, revoked: false });
+});
+
 test('repository creates authenticatable owner records in one transaction', async (t) => {
   const database = new PGlite();
   t.after(() => database.close());
@@ -120,6 +169,113 @@ test('repository creates authenticatable owner records in one transaction', asyn
   assert.equal(identity.userId, userId);
   assert.equal(identity.deviceId, deviceId);
   assert.equal(identity.role, 'owner');
+});
+
+test('rotation preserves access and revocation enforces 401 while missing access enforces 403', async (t) => {
+  const database = new PGlite();
+  t.after(() => database.close());
+  await runMigrations(migrationConnection(database));
+  await database.query(
+    'INSERT INTO devices(device_id, name) VALUES ($1, $2), ($3, $4)',
+    [deviceId, 'Owned feeder', otherDeviceId, 'Other feeder'],
+  );
+  const provisioningDatabase = transactionDatabase(database);
+  const repository = createUserProvisioningRepository(provisioningDatabase);
+  const issued = await createUserProvisioningService(
+    repository,
+    deterministicRandom([credentialId, userId, userDeviceId], 20),
+  ).provisionOwner(deviceId);
+  const lifecycleService = createUserProvisioningService(
+    repository,
+    deterministicRandom([rotatedCredentialId], 21),
+  );
+
+  const rotated = await lifecycleService.rotateUserToken(userId);
+  const authenticator = createUserAuthenticator(
+    createUserAuthenticationRepository(provisioningDatabase),
+  );
+
+  await rejectsWithStatus(
+    authenticator.authenticate(`Bearer ${issued.userToken}`, deviceId, 'owner'),
+    401,
+  );
+  const identity = await authenticator.authenticate(
+    `Bearer ${rotated.userToken}`,
+    deviceId,
+    'owner',
+  );
+  assert.equal(identity.userId, userId);
+  assert.equal(identity.role, 'owner');
+  await rejectsWithStatus(
+    authenticator.authenticate(`Bearer ${rotated.userToken}`, otherDeviceId, 'viewer'),
+    403,
+  );
+
+  assert.deepEqual(await lifecycleService.revokeUserToken(userId), { userId, revoked: true });
+  assert.deepEqual(await lifecycleService.revokeUserToken(userId), { userId, revoked: false });
+  await rejectsWithStatus(
+    authenticator.authenticate(`Bearer ${rotated.userToken}`, deviceId, 'owner'),
+    401,
+  );
+
+  assert.equal((await database.query('SELECT * FROM users WHERE user_id = $1', [userId])).rows.length, 1);
+  const access = await database.query<{ role: string }>(
+    `SELECT role FROM user_devices
+     WHERE user_id = $1 AND device_id = $2 AND revoked_at IS NULL`,
+    [userId, deviceId],
+  );
+  assert.equal(access.rows[0]?.role, 'owner');
+  assert.equal((await database.query(
+    'SELECT * FROM user_credentials WHERE user_id = $1',
+    [userId],
+  )).rows.length, 2);
+  assert.equal((await database.query(
+    'SELECT * FROM user_credentials WHERE user_id = $1 AND revoked_at IS NULL',
+    [userId],
+  )).rows.length, 0);
+});
+
+test('failed rotation keeps the previous token active and creates no partial credential', async (t) => {
+  const database = new PGlite();
+  t.after(() => database.close());
+  await runMigrations(migrationConnection(database));
+  await database.query(
+    'INSERT INTO devices(device_id, name) VALUES ($1, $2), ($3, $4)',
+    [deviceId, 'First feeder', otherDeviceId, 'Second feeder'],
+  );
+  const provisioningDatabase = transactionDatabase(database);
+  const repository = createUserProvisioningRepository(provisioningDatabase);
+  const first = await createUserProvisioningService(
+    repository,
+    deterministicRandom([credentialId, userId, userDeviceId], 22),
+  ).provisionOwner(deviceId);
+  await createUserProvisioningService(
+    repository,
+    deterministicRandom([secondCredentialId, secondUserId, secondUserDeviceId], 23),
+  ).provisionOwner(otherDeviceId);
+
+  await assert.rejects(createUserProvisioningService(
+    repository,
+    deterministicRandom([secondCredentialId], 24),
+  ).rotateUserToken(userId));
+
+  const authenticator = createUserAuthenticator(
+    createUserAuthenticationRepository(provisioningDatabase),
+  );
+  const identity = await authenticator.authenticate(
+    `Bearer ${first.userToken}`,
+    deviceId,
+    'owner',
+  );
+  assert.equal(identity.userId, userId);
+  assert.equal(identity.role, 'owner');
+  const credentials = await database.query<{ credential_id: string; revoked_at: unknown }>(
+    'SELECT credential_id, revoked_at FROM user_credentials WHERE user_id = $1',
+    [userId],
+  );
+  assert.equal(credentials.rows.length, 1);
+  assert.equal(credentials.rows[0]?.credential_id, credentialId);
+  assert.equal(credentials.rows[0]?.revoked_at, null);
 });
 
 test('repository refuses a second owner and rolls back credential conflicts', async (t) => {
@@ -191,22 +347,43 @@ function deterministicRandom(
   };
 }
 
-function memoryRepository(): UserProvisioningRepository & {
+interface MemoryUserProvisioningRepository extends UserProvisioningRepository {
   created: NewOwnerValues[];
+  rotated: Array<{ userId: string; credential: UserCredentialValues }>;
+  revoked: string[];
   result: ProvisionOwnerResult;
-} {
-  const storage: UserProvisioningRepository & {
-    created: NewOwnerValues[];
-    result: ProvisionOwnerResult;
-  } = {
+  rotateResult: boolean;
+  revokeResult: RevokeUserCredentialResult;
+}
+
+function memoryRepository(): MemoryUserProvisioningRepository {
+  const storage: MemoryUserProvisioningRepository = {
     created: [],
+    rotated: [],
+    revoked: [],
     result: 'created',
+    rotateResult: true,
+    revokeResult: 'revoked',
     async provisionOwner(values) {
       storage.created.push(values);
       return storage.result;
     },
+    async rotateCredential(requestedUserId, credential) {
+      storage.rotated.push({ userId: requestedUserId, credential });
+      return storage.rotateResult;
+    },
+    async revokeCredential(requestedUserId) {
+      storage.revoked.push(requestedUserId);
+      return storage.revokeResult;
+    },
   };
   return storage;
+}
+
+async function rejectsWithStatus(promise: Promise<unknown>, statusCode: number): Promise<void> {
+  await assert.rejects(promise, (error: unknown) => (
+    error instanceof HttpError && error.statusCode === statusCode
+  ));
 }
 
 function migrationConnection(database: PGlite): MigrationConnection {

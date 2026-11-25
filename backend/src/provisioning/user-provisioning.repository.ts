@@ -16,9 +16,12 @@ export interface NewOwnerValues {
 }
 
 export type ProvisionOwnerResult = 'created' | 'device_not_found' | 'owner_exists';
+export type RevokeUserCredentialResult = 'revoked' | 'already_revoked' | 'user_not_found';
 
 export interface UserProvisioningRepository {
   provisionOwner(values: NewOwnerValues): Promise<ProvisionOwnerResult>;
+  rotateCredential(userId: string, credential: UserCredentialValues): Promise<boolean>;
+  revokeCredential(userId: string): Promise<RevokeUserCredentialResult>;
 }
 
 interface ProvisioningClient extends QueryExecutor {
@@ -35,6 +38,14 @@ interface DeviceRow extends QueryResultRow {
 
 interface OwnerRow extends QueryResultRow {
   user_device_id: string;
+}
+
+interface UserRow extends QueryResultRow {
+  user_id: string;
+}
+
+interface CredentialRow extends QueryResultRow {
+  credential_id: string;
 }
 
 export function createUserProvisioningRepository(
@@ -61,17 +72,7 @@ export function createUserProvisioningRepository(
           'INSERT INTO users(user_id) VALUES ($1)',
           [values.userId],
         );
-        await client.query(
-          `INSERT INTO user_credentials(
-             credential_id, user_id, token_hash, token_hint
-           ) VALUES ($1, $2, $3, $4)`,
-          [
-            values.credential.credentialId,
-            values.userId,
-            values.credential.tokenHash,
-            values.credential.tokenHint,
-          ],
-        );
+        await insertCredential(client, values.userId, values.credential);
         await client.query(
           `INSERT INTO user_devices(
              user_device_id, user_id, device_id, role
@@ -81,7 +82,58 @@ export function createUserProvisioningRepository(
         return 'created';
       });
     },
+
+    async rotateCredential(userId, credential) {
+      return withTransaction(database, async (client) => {
+        if (!await lockUser(client, userId)) return false;
+
+        await client.query(
+          `UPDATE user_credentials
+           SET revoked_at = clock_timestamp()
+           WHERE user_id = $1 AND revoked_at IS NULL`,
+          [userId],
+        );
+        await insertCredential(client, userId, credential);
+        return true;
+      });
+    },
+
+    async revokeCredential(userId) {
+      return withTransaction(database, async (client) => {
+        if (!await lockUser(client, userId)) return 'user_not_found';
+
+        const result = await client.query<CredentialRow>(
+          `UPDATE user_credentials
+           SET revoked_at = clock_timestamp()
+           WHERE user_id = $1 AND revoked_at IS NULL
+           RETURNING credential_id`,
+          [userId],
+        );
+        return result.rows.length > 0 ? 'revoked' : 'already_revoked';
+      });
+    },
   };
+}
+
+async function insertCredential(
+  client: QueryExecutor,
+  userId: string,
+  credential: UserCredentialValues,
+): Promise<void> {
+  await client.query(
+    `INSERT INTO user_credentials(
+       credential_id, user_id, token_hash, token_hint
+     ) VALUES ($1, $2, $3, $4)`,
+    [credential.credentialId, userId, credential.tokenHash, credential.tokenHint],
+  );
+}
+
+async function lockUser(client: QueryExecutor, userId: string): Promise<boolean> {
+  const result = await client.query<UserRow>(
+    'SELECT user_id FROM users WHERE user_id = $1 FOR UPDATE',
+    [userId],
+  );
+  return result.rows.length > 0;
 }
 
 async function withTransaction<T>(
