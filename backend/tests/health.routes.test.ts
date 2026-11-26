@@ -52,6 +52,31 @@ test('Fastify application initializes without opening a network port', async (t)
   assert.equal(app.server.listening, false);
 });
 
+test('Swagger generates the device API and separates Android and Khadas tokens', async (t) => {
+  const app = await buildApp({
+    checkDatabase: async () => undefined,
+    commandRepository: unusedCommandRepository,
+    deviceRepository: unusedDeviceRepository,
+    feedingRepository: unusedFeedingRepository,
+    scheduleRepository: unusedScheduleRepository,
+  });
+  t.after(() => app.close());
+
+  const ui = await app.inject('/docs/');
+  assert.equal(ui.statusCode, 200);
+  const response = await app.inject('/docs/json');
+  assert.equal(response.statusCode, 200);
+  const document = response.json();
+  const state = document.paths['/api/v1/devices/{device_id}/state'];
+  assert.deepEqual(state.get.security, [{ userToken: [] }]);
+  assert.deepEqual(state.put.security, [{ deviceToken: [] }]);
+  const devicePaths = Object.entries(document.paths as Record<string, object>)
+    .filter(([path]) => path.startsWith('/api/v1/devices/'));
+  const methods = new Set(['get', 'post', 'put', 'delete']);
+  assert.equal(devicePaths.flatMap(([, operations]) =>
+    Object.keys(operations).filter((method) => methods.has(method))).length, 14);
+});
+
 test('GET /health reports that HTTP server is alive without checking PostgreSQL', async (t) => {
   let databaseChecks = 0;
   const app = await buildApp({

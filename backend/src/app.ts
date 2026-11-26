@@ -2,6 +2,8 @@ import Fastify, {
   type FastifyInstance,
   type FastifyServerOptions,
 } from 'fastify';
+import swagger from '@fastify/swagger';
+import swaggerUi from '@fastify/swagger-ui';
 
 import {
   rejectingDeviceAuthenticator,
@@ -51,6 +53,33 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
   });
 
   app.setErrorHandler(errorHandler);
+  await app.register(swagger, {
+    openapi: {
+      openapi: '3.1.0',
+      info: { title: 'Smart Cat Feeder API', version: '0.1.0' },
+      components: {
+        securitySchemes: {
+          userToken: { type: 'http', scheme: 'bearer', description: 'Android user token (usr_)' },
+          deviceToken: { type: 'http', scheme: 'bearer', description: 'Khadas device token (dvc_)' },
+        },
+      },
+    },
+    transform: ({ schema, url, route }) => {
+      if (!url.startsWith('/api/v1/devices/')) return { schema, url };
+      const userRoute = url.endsWith('/feeding-commands')
+        || /\/schedules(?:\/:schedule_id)?$/.test(url) && !url.endsWith('/sync/schedules')
+        || route.method === 'GET' && /\/(?:state|feedings)(?:\/:feeding_id)?$/.test(url);
+      return {
+        url,
+        schema: {
+          ...schema,
+          tags: [userRoute ? 'Android' : 'Khadas'],
+          security: [userRoute ? { userToken: [] } : { deviceToken: [] }],
+        },
+      };
+    },
+  });
+  await app.register(swaggerUi, { routePrefix: '/docs' });
   app.decorateRequest('deviceIdentity', null);
   app.decorateRequest('userIdentity', null);
   const deviceAuthenticator = options.deviceAuthenticator ?? rejectingDeviceAuthenticator;
