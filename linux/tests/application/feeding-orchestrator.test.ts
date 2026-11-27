@@ -29,6 +29,7 @@ import {
   BackendTransportError,
   OutboxConflictError,
   type BackendGateway,
+  type Clock,
   type ManualCommand,
   type ScheduledFeedingIntent,
 } from '../../src/ports/index.js';
@@ -234,47 +235,145 @@ test('repeated pending delivery never dispenses again and the result uses the ac
   assert.deepEqual(harness.store.listPendingOutbox(10, '2099-01-01T00:00:00.000Z'), []);
 });
 
-test('a recovered ack can be reconciled after expiry without starting an actuation attempt', async (t) => {
-  const harness = createHarness(t, 'normal', 'expired-ack-replay');
-  const command = { ...manualCommand(harness, 8), expiresAt: '2026-11-21T13:00:01.000Z' };
-  harness.store.recordManualCommand(command);
-  deliverHeartbeat(harness);
-  assert.ok(harness.store.recordManualAckIntent(command.commandId, initialTime));
+test('startup reconciles the original unconfirmed ack after expiry without starting the motor', async (t) => {
+  const previous = createHarness(t, 'normal', 'expired-ack-replay');
+  const command = { ...manualCommand(previous, 8), expiresAt: '2026-11-21T13:00:01.000Z' };
+  previous.store.recordManualCommand(command);
+  deliverHeartbeat(previous);
+  assert.ok(previous.store.recordManualAckIntent(command.commandId, initialTime));
+  const harness = previous.restart();
   await harness.twin.clock.advanceBy(1_000);
   let replays = 0;
   const queue = commandQueue(harness, (id, request) => {
     replays += 1;
     assert.equal(id, command.commandId);
-    assert.equal(request.started_at, initialTime);
+    assert.deepEqual(request, { feeding_id: command.feedingId, started_at: initialTime, status: 'running' });
     return acceptAck(id, request);
   });
 
-  assert.equal(await harness.orchestrator.executeNextManual(queue, new AbortController().signal), null);
+  await runManualStartup(harness, queue);
   assert.equal(replays, 1);
   assert.equal(harness.store.getNextPendingManualAck(), null);
   assert.equal(harness.store.getFeeding(command.feedingId), null);
   assert.equal(harness.twin.gpio.transitions().length, 0);
 });
 
-test('a saved actuation attempt is not eligible again after reopening the journal', (t) => {
-  const harness = createHarness(t, 'normal', 'restart-attempt');
-  const command = manualCommand(harness, 8);
-  harness.store.recordManualCommand(command);
-  const ack = harness.store.recordManualAckIntent(command.commandId, initialTime);
+test('startup finalizes an interrupted attempt as failed without measuring or dispensing again', async (t) => {
+  const previous = createHarness(t, 'normal', 'restart-attempt');
+  const command = manualCommand(previous, 8);
+  const startedAt = '2026-11-21T13:00:01.500Z';
+  previous.store.recordManualCommand(command);
+  const ack = previous.store.recordManualAckIntent(command.commandId, startedAt);
   assert.ok(ack);
-  harness.store.resolveManualAck(ack, 'acked');
-  assert.ok(harness.store.recordManualActuationIntent(command.commandId, initialTime));
-  harness.store.close();
+  previous.store.resolveManualAck(ack, 'acked');
+  assert.ok(previous.store.recordManualActuationIntent(command.commandId, startedAt));
+  const harness = previous.restart();
 
-  const reopened = SqliteLocalStore.open({ databasePath: harness.databasePath });
-  try {
-    assert.equal(reopened.recordManualCommand(command), false);
-    assert.equal(reopened.getFeeding(command.feedingId)?.status, 'running');
-    assert.equal(reopened.getNextManualCommandWork(initialTime), null);
-    assert.equal(reopened.recordManualActuationIntent(command.commandId, initialTime), null);
-  } finally {
-    reopened.close();
-  }
+  let delivered = 0;
+  t.mock.method(harness.twin.weightSensor, 'tare', () => assert.fail('Recovery must not tare the sensor'));
+  t.mock.method(harness.twin.weightSensor, 'readGrams', () => assert.fail('Recovery must not read the sensor'));
+  await runManualStartup(harness, commandQueue(harness, unexpectedAck), (feedingId, payload) => {
+    delivered += 1;
+    assert.equal(feedingId, command.feedingId);
+    assert.equal(payload.command_id, command.commandId);
+    assert.equal(payload.status, 'failed');
+    assert.equal(payload.started_at, startedAt);
+    assert.equal(payload.finished_at, startedAt);
+    assert.equal(payload.actual_grams, null);
+    assert.equal(payload.error_code, 'INTERNAL_ERROR');
+    assert.match(payload.error_message, /interrupted by a restart/);
+    const [message] = harness.store.listPendingOutbox(10, initialTime, 'manual_result');
+    assert.equal(message?.payload, JSON.stringify(payload));
+    assert.equal(harness.store.getFeeding(feedingId)?.terminalPayload, message.payload);
+    assert.equal(harness.store.listInterruptedManualFeedings().length, 0);
+    return acceptResult(feedingId, payload);
+  });
+  assert.equal(delivered, 1);
+  assert.equal(harness.store.recordManualCommand(command), false);
+  assert.equal(harness.store.getFeeding(command.feedingId)?.status, 'failed');
+  assert.equal(harness.twin.gpio.transitions().length, 0);
+
+  const again = harness.restart();
+  await runManualStartup(again, commandQueue(again, unexpectedAck));
+  assert.equal(again.store.getFeeding(command.feedingId)?.status, 'failed');
+  assert.equal(again.twin.gpio.transitions().length, 0);
+});
+
+test('a restart between successful ack and actuation records at most one physical attempt', async (t) => {
+  const previous = createHarness(t, 'normal', 'restart-after-ack');
+  const command = manualCommand(previous, 8);
+  previous.store.recordManualCommand(command);
+  deliverHeartbeat(previous);
+  const interrupted = new Error('Stopped before recording actuation');
+  t.mock.method(previous.store, 'recordManualActuationIntent', () => { throw interrupted; });
+  await assert.rejects(
+    previous.orchestrator.executeNextManual(commandQueue(previous), new AbortController().signal),
+    (error) => error === interrupted,
+  );
+  assert.equal(previous.store.getNextManualCommandWork(initialTime)?.phase, 'acked');
+  assert.equal(previous.store.getFeeding(command.feedingId), null);
+  assert.equal(previous.twin.gpio.transitions().length, 0);
+
+  const harness = previous.restart();
+  await harness.twin.clock.advanceBy(1_000);
+  const queue = commandQueue(harness, unexpectedAck);
+  await runManualStartup(harness, queue, (feedingId, payload) => {
+    assert.equal(feedingId, command.feedingId);
+    assert.equal(payload.status, 'completed');
+    assert.equal(payload.started_at, initialTime);
+    return acceptResult(feedingId, payload);
+  });
+  assert.equal(harness.store.getFeeding(command.feedingId)?.status, 'completed');
+  await runManualStartup(harness, queue);
+  assert.equal(harness.twin.gpio.transitions().filter(({ line, value }) => line === 'motor_enable' && value).length, 1);
+});
+
+test('startup retries the exact saved result without rerunning a finished feeding', async (t) => {
+  const previous = createHarness(t, 'normal', 'restart-outbox');
+  const command = manualCommand(previous, 8);
+  previous.store.recordManualCommand(command);
+  deliverHeartbeat(previous);
+  const saved = await driveUntilSettled(previous, previous.orchestrator.executeNextManual(
+    commandQueue(previous), new AbortController().signal,
+  ));
+  assert.ok(saved);
+  previous.store.enqueueOutbox({
+    kind: 'scheduled_event',
+    aggregateId: 'unrelated-scheduled-feeding',
+    payload: '{}',
+    createdAt: initialTime,
+    nextAttemptAt: initialTime,
+  });
+
+  const payloads: string[] = [];
+  const offline = previous.restart();
+  await offline.twin.clock.advanceTo(previous.twin.clock.now());
+  await runManualStartup(offline, commandQueue(offline, unexpectedAck), async (feedingId, payload) => {
+    assert.equal(feedingId, command.feedingId);
+    payloads.push(JSON.stringify(payload));
+    throw new BackendTransportError(1, new Error('offline'));
+  });
+  const [pending] = offline.store.listPendingOutbox(10, '2099-01-01T00:00:00.000Z', 'manual_result');
+  assert.equal(pending?.id, saved.outboxId);
+  assert.equal(pending.attemptCount, 1);
+  assert.equal(pending.payload, saved.terminalPayload);
+  assert.equal(offline.twin.gpio.transitions().length, 0);
+
+  const restored = offline.restart();
+  const queue = commandQueue(restored, unexpectedAck);
+  await runManualStartup(restored, queue);
+  await restored.twin.clock.advanceTo(pending.nextAttemptAt);
+  await runManualStartup(restored, queue, (feedingId, payload) => {
+    assert.equal(feedingId, command.feedingId);
+    payloads.push(JSON.stringify(payload));
+    return acceptResult(feedingId, payload);
+  });
+  assert.deepEqual(payloads, [saved.terminalPayload, saved.terminalPayload]);
+  assert.equal(restored.store.getFeeding(command.feedingId)?.status, 'completed');
+  assert.equal(restored.twin.gpio.transitions().length, 0);
+  assert.deepEqual(restored.store.listPendingOutbox(10, '2099-01-01T00:00:00.000Z').map(({ kind }) => kind), [
+    'scheduled_event',
+  ]);
 });
 
 test('motor jam produces MOTOR_ERROR and always performs safe stop', async (t) => {
@@ -373,6 +472,7 @@ interface Harness {
   readonly reporter: DeviceStateReporter;
   readonly orchestrator: FeedingOrchestrator;
   readonly logger: JsonLogger;
+  restart(): Harness;
 }
 
 function createHarness(
@@ -383,41 +483,50 @@ function createHarness(
 ): Harness {
   const directory = mkdtempSync(join(tmpdir(), 'smart-cat-feeder-orchestrator-'));
   const databasePath = join(directory, 'device.sqlite');
-  const store = SqliteLocalStore.open({ databasePath });
+  let store = SqliteLocalStore.open({ databasePath });
   t.after(() => {
     store.close();
     rmSync(directory, { recursive: true, force: true });
   });
-  const logger = createJsonLogger({ level: 'error', sink: () => {} });
-  const telemetry = new LoggerTelemetry(logger);
-  const twin = createDigitalTwin({ seed, initialTime, scenario, telemetry });
-  const reporter = new DeviceStateReporter({
-    deviceId,
-    firmwareVersion: '0.1.0',
-    heartbeatIntervalMs: 30_000,
-    maxClockSkewMs: 30_000,
-    gateway: { close() {} } as BackendGateway,
-    store,
-    clock: twin.clock,
-    logger,
-  });
-  return {
-    databasePath,
-    store,
-    twin,
-    reporter,
-    logger,
-    orchestrator: new FeedingOrchestrator({
+  return buildHarness();
+
+  function buildHarness(): Harness {
+    const logger = createJsonLogger({ level: 'error', sink: () => {} });
+    const telemetry = new LoggerTelemetry(logger);
+    const twin = createDigitalTwin({ seed, initialTime, scenario, telemetry });
+    const reporter = new DeviceStateReporter({
+      deviceId,
+      firmwareVersion: '0.1.0',
+      heartbeatIntervalMs: 30_000,
+      maxClockSkewMs: 30_000,
+      gateway: { close() {} } as BackendGateway,
       store,
-      executionLock: twin.executionLock,
-      motor: twin.motor,
-      weightSensor: twin.weightSensor,
       clock: twin.clock,
-      deviceStateReporter: reporter,
-      telemetry,
-      maximumExecutionMs,
-    }),
-  };
+      logger,
+    });
+    return {
+      databasePath,
+      store,
+      twin,
+      reporter,
+      logger,
+      orchestrator: new FeedingOrchestrator({
+        store,
+        executionLock: twin.executionLock,
+        motor: twin.motor,
+        weightSensor: twin.weightSensor,
+        clock: twin.clock,
+        deviceStateReporter: reporter,
+        telemetry,
+        maximumExecutionMs,
+      }),
+      restart() {
+        store.close();
+        store = SqliteLocalStore.open({ databasePath });
+        return buildHarness();
+      },
+    };
+  }
 }
 
 function scheduledIntent(harness: Harness, portionGrams: number): ScheduledFeedingIntent {
@@ -447,6 +556,18 @@ const acceptAck: BackendGateway['acknowledgeCommand'] = async (id, request) => (
   data: { command_id: id, ...request },
 });
 
+const unexpectedAck: BackendGateway['acknowledgeCommand'] = async () => assert.fail('Unexpected ack');
+
+const acceptResult: BackendGateway['reportManualFeedingResult'] = async (feedingId, payload) => {
+  const common = { feeding_id: feedingId, command_id: payload.command_id, finished_at: payload.finished_at };
+  return {
+    requestId: null,
+    data: payload.status === 'completed'
+      ? { ...common, status: payload.status, actual_grams: payload.actual_grams }
+      : { ...common, status: payload.status, actual_grams: payload.actual_grams },
+  };
+};
+
 function commandQueue(
   harness: Harness,
   acknowledgeCommand: BackendGateway['acknowledgeCommand'] = acceptAck,
@@ -463,16 +584,30 @@ function manualWorker(
   harness: Harness,
   queue: ManualCommandQueue,
   reportManualFeedingResult: BackendGateway['reportManualFeedingResult'] = async () => assert.fail('Unexpected result'),
+  clock: Clock = harness.twin.clock,
 ): ManualFeedingWorker {
   return new ManualFeedingWorker({
     queue,
     feedingOrchestrator: harness.orchestrator,
     store: harness.store,
     gateway: { reportManualFeedingResult },
-    clock: harness.twin.clock,
+    clock,
     logger: harness.logger,
     intervalMs: 5_000,
   });
+}
+
+async function runManualStartup(
+  harness: Harness,
+  queue: ManualCommandQueue,
+  report?: BackendGateway['reportManualFeedingResult'],
+): Promise<void> {
+  const controller = new AbortController();
+  const worker = manualWorker(harness, queue, report, {
+    now: () => harness.twin.clock.now(),
+    async sleep() { controller.abort(); },
+  });
+  await driveUntilSettled(harness, worker.run(controller.signal));
 }
 
 function deliverHeartbeat(harness: Harness, clockOffsetMs = 0): void {

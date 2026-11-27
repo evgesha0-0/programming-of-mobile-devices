@@ -184,7 +184,8 @@ export class FeedingOrchestrator {
         }
       }
 
-      const elapsedMs = Math.max(0, this.readClockMilliseconds() - attemptStartedAtMs);
+      const deviceFinishedAtMs = this.readClockMilliseconds();
+      const elapsedMs = Math.max(0, deviceFinishedAtMs - attemptStartedAtMs);
       const finishedAtMs = Math.max(Date.parse(startedAt), (serverAttemptAtMs ?? attemptStartedAtMs) + elapsedMs);
       const finishedAt = utcDateTimeSchema.parse(new Date(finishedAtMs).toISOString());
       const terminal = buildTerminalPayload(intent, startedAt, finishedAt, actualGrams, failure);
@@ -215,7 +216,7 @@ export class FeedingOrchestrator {
         aggregateId: intent.feedingId,
         payload: terminalPayload,
         createdAt: finishedAt,
-        nextAttemptAt: finishedAt,
+        nextAttemptAt: intent.source === 'manual' ? new Date(deviceFinishedAtMs).toISOString() : finishedAt,
       });
 
       if (terminal.status === 'completed') {

@@ -363,15 +363,25 @@ export class SqliteLocalStore implements LocalStore {
       `).get(now, id, now);
       if (!row) return null;
 
-      const { feedingId, portionGrams, createdAt } = readManualCommand(row);
-      const startedAt = utcDateTimeSchema.parse(readString(row, 'ack_started_at'));
+      const attempt = readManualFeedingAttempt(row);
       this.database.prepare(`
         INSERT INTO feedings(
           feeding_id, source, command_id, portion_grams_cents, status, created_at, started_at
         ) VALUES (?, 'manual', ?, ?, 'running', ?, ?)
-      `).run(feedingId, id, gramsToCents(portionGrams), createdAt, startedAt);
-      return { source: 'manual', commandId: id, feedingId, scheduleId: null, portionGrams, createdAt, startedAt };
+      `).run(attempt.feedingId, id, gramsToCents(attempt.portionGrams), attempt.createdAt, attempt.startedAt);
+      return attempt;
     });
+  }
+
+  listInterruptedManualFeedings(): ManualFeedingAttempt[] {
+    this.assertOpen();
+    return this.database.prepare(`
+      SELECT command_id, feeding_id, created_at, expires_at, ack_started_at,
+             json_extract(payload_json, '$.portion_grams') AS portion_grams
+      FROM commands
+      WHERE phase = 'actuation_intent'
+      ORDER BY julianday(ack_started_at), command_id
+    `).all().map(readManualFeedingAttempt);
   }
 
   getFeeding(feedingId: FeedingId): StoredLocalFeeding | null {
@@ -687,7 +697,7 @@ export class SqliteLocalStore implements LocalStore {
     return this.transaction(() => this.enqueueOutboxWithinTransaction(message));
   }
 
-  listPendingOutbox(limit: number, availableAt: UtcDateTime): OutboxMessage[] {
+  listPendingOutbox(limit: number, availableAt: UtcDateTime, kind?: OutboxKind): OutboxMessage[] {
     this.assertOpen();
     if (!Number.isSafeInteger(limit) || limit < 1) {
       throw new RangeError('limit must be a positive safe integer');
@@ -706,9 +716,10 @@ export class SqliteLocalStore implements LocalStore {
       FROM outbox
       WHERE delivered_at IS NULL
         AND julianday(next_attempt_at) <= julianday(?)
+        AND (? IS NULL OR kind = ?)
       ORDER BY julianday(created_at), id
       LIMIT ?
-    `).all(parsedAvailableAt, limit);
+    `).all(parsedAvailableAt, kind ?? null, kind ?? null, limit);
     return rows.map(readOutboxMessage);
   }
 
@@ -897,6 +908,19 @@ function readManualCommand(row: Record<string, unknown>): ManualCommand {
     portionGrams: portionGramsSchema.parse(row.portion_grams),
     createdAt: utcDateTimeSchema.parse(readString(row, 'created_at')),
     expiresAt: utcDateTimeSchema.parse(readString(row, 'expires_at')),
+  };
+}
+
+function readManualFeedingAttempt(row: Record<string, unknown>): ManualFeedingAttempt {
+  const { commandId, feedingId, portionGrams, createdAt } = readManualCommand(row);
+  return {
+    source: 'manual',
+    commandId,
+    feedingId,
+    scheduleId: null,
+    portionGrams,
+    createdAt,
+    startedAt: utcDateTimeSchema.parse(readString(row, 'ack_started_at')),
   };
 }
 

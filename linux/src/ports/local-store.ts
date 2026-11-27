@@ -153,6 +153,7 @@ export interface LocalStore {
   recordManualAckIntent(commandId: CommandId, startedAt: UtcDateTime): ManualCommandAckIntent | null;
   resolveManualAck(intent: ManualCommandAckIntent, phase: 'acked' | 'quarantined'): void;
   recordManualActuationIntent(commandId: CommandId, serverNow: UtcDateTime): ManualFeedingAttempt | null;
+  listInterruptedManualFeedings(): ManualFeedingAttempt[];
   getFeeding(feedingId: FeedingId): StoredLocalFeeding | null;
   recordFeedingIntent(intent: FeedingIntent): boolean;
   markFeedingRunning(feedingId: FeedingId, startedAt: UtcDateTime): boolean;
@@ -162,7 +163,7 @@ export interface LocalStore {
   getScheduleOccurrence(occurrenceKey: string): ScheduleOccurrenceClaim | null;
   claimScheduleOccurrence(claim: ScheduleOccurrenceClaim): boolean;
   enqueueOutbox(message: NewOutboxMessage): number;
-  listPendingOutbox(limit: number, availableAt: UtcDateTime): OutboxMessage[];
+  listPendingOutbox(limit: number, availableAt: UtcDateTime, kind?: OutboxKind): OutboxMessage[];
   rescheduleOutbox(id: number, nextAttemptAt: UtcDateTime, lastError: string): boolean;
   markOutboxDelivered(id: number, deliveredAt: UtcDateTime): boolean;
 }
