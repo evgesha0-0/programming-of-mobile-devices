@@ -4,8 +4,10 @@ import {
   type ManualFeedingResultRequest,
   type ScheduledFeedingEventRequest,
 } from '../contracts/index.js';
-import { utcDateTimeSchema } from '../domain/index.js';
+import { utcDateTimeSchema, type FeedingId, type UtcDateTime } from '../domain/index.js';
 import type { DeviceStateReporter } from './device-state-reporter.js';
+import type { ManualCommandQueue } from './manual-command-queue.js';
+import { BackendGatewayError } from '../ports/index.js';
 import type {
   Clock,
   ExecutionLock,
@@ -13,6 +15,7 @@ import type {
   FeedingIntent,
   LocalStore,
   MotorPort,
+  ScheduledFeedingIntent,
   Telemetry,
   WeightSensorPort,
 } from '../ports/index.js';
@@ -67,6 +70,12 @@ interface HardwareFailure {
   readonly cause: unknown;
 }
 
+interface PreparedFeeding {
+  readonly intent: FeedingIntent;
+  readonly startedAt: UtcDateTime;
+  readonly serverAttemptAtMs?: number;
+}
+
 export class FeedingOrchestrator {
   constructor(private readonly options: FeedingOrchestratorOptions) {
     if (!Number.isSafeInteger(options.maximumExecutionMs) || options.maximumExecutionMs < 1) {
@@ -74,12 +83,56 @@ export class FeedingOrchestrator {
     }
   }
 
-  async execute(intent: FeedingIntent, signal: AbortSignal): Promise<FeedingExecutionResult> {
-    const lease = await this.options.executionLock.acquire(intent.feedingId, signal);
-    try {
+  async execute(intent: ScheduledFeedingIntent, signal: AbortSignal): Promise<FeedingExecutionResult> {
+    if (intent.source !== 'scheduled') throw new TypeError('Manual feeding requires a confirmed command');
+    const result = await this.executeWithLease(intent.feedingId, signal, () => {
       if (!this.options.store.recordFeedingIntent(intent)) {
         throw new DuplicateFeedingExecutionError(intent.feedingId);
       }
+      const startedAt = utcDateTimeSchema.parse(new Date(this.readClockMilliseconds()).toISOString());
+      if (!this.options.store.markFeedingRunning(intent.feedingId, startedAt)) {
+        throw new DuplicateFeedingExecutionError(intent.feedingId);
+      }
+      return { intent, startedAt };
+    });
+    if (result === null) throw new Error('Scheduled feeding unexpectedly skipped');
+    return result;
+  }
+
+  async executeNextManual(queue: ManualCommandQueue, signal: AbortSignal): Promise<FeedingExecutionResult | null> {
+    if (signal.aborted) return null;
+    const command = queue.getNextForExecution();
+    if (command === null) return null;
+
+    return this.executeWithLease(command.feedingId, signal, async () => {
+      if (signal.aborted) return null;
+      if (command.phase !== 'acked') {
+        const ack = command.phase === 'received'
+          ? await queue.acknowledgeFirst(command.commandId)
+          : await queue.retryPendingAck(command.commandId);
+        if (ack === null || signal.aborted) return null;
+      }
+      const serverNow = queue.readServerNow();
+      if (serverNow === null) return null;
+      const attempt = this.options.store.recordManualActuationIntent(command.commandId, serverNow.toISOString());
+      return attempt === null ? null : {
+        intent: attempt,
+        startedAt: attempt.startedAt,
+        serverAttemptAtMs: serverNow.getTime(),
+      };
+    });
+  }
+
+  private async executeWithLease(
+    feedingId: FeedingId,
+    signal: AbortSignal,
+    prepare: () => PreparedFeeding | Promise<PreparedFeeding | null>,
+  ): Promise<FeedingExecutionResult | null> {
+    const lease = await this.options.executionLock.acquire(feedingId, signal);
+    try {
+      const prepared = await prepare();
+      if (prepared === null) return null;
+      const { intent, startedAt, serverAttemptAtMs } = prepared;
 
       this.options.deviceStateReporter.setState('busy');
       this.options.telemetry.event('feeding_execution_started', {
@@ -88,22 +141,19 @@ export class FeedingOrchestrator {
         portionGrams: intent.portionGrams,
       });
 
-      const startedAtMs = this.readClockMilliseconds();
-      const startedAt = utcDateTimeSchema.parse(new Date(startedAtMs).toISOString());
-      if (!this.options.store.markFeedingRunning(intent.feedingId, startedAt)) {
-        throw new DuplicateFeedingExecutionError(intent.feedingId);
-      }
+      const attemptStartedAtMs = this.readClockMilliseconds();
 
       let actualGrams: number | null = null;
       let failure: HardwareFailure | null = null;
       let phase: 'sensor' | 'motor' = 'sensor';
       try {
         await this.options.weightSensor.tare(signal);
+        signal.throwIfAborted();
         phase = 'motor';
         await this.options.motor.start(signal);
 
         while (actualGrams === null || actualGrams < intent.portionGrams) {
-          if (this.readClockMilliseconds() - startedAtMs >= this.options.maximumExecutionMs) {
+          if (this.readClockMilliseconds() - attemptStartedAtMs >= this.options.maximumExecutionMs) {
             throw new FeedingTimeoutError();
           }
           phase = 'sensor';
@@ -134,7 +184,8 @@ export class FeedingOrchestrator {
         }
       }
 
-      const finishedAtMs = Math.max(this.readClockMilliseconds(), startedAtMs);
+      const elapsedMs = Math.max(0, this.readClockMilliseconds() - attemptStartedAtMs);
+      const finishedAtMs = Math.max(Date.parse(startedAt), (serverAttemptAtMs ?? attemptStartedAtMs) + elapsedMs);
       const finishedAt = utcDateTimeSchema.parse(new Date(finishedAtMs).toISOString());
       const terminal = buildTerminalPayload(intent, startedAt, finishedAt, actualGrams, failure);
       const terminalPayload = JSON.stringify(terminal.payload);
@@ -196,7 +247,7 @@ export class FeedingOrchestrator {
         outboxId,
       });
     } catch (error) {
-      if (!(error instanceof DuplicateFeedingExecutionError)) {
+      if (!(error instanceof DuplicateFeedingExecutionError || error instanceof BackendGatewayError)) {
         this.options.deviceStateReporter.setState(
           'error',
           'INTERNAL_ERROR',

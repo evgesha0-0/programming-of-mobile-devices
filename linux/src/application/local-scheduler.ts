@@ -172,8 +172,8 @@ export class LocalScheduler {
     this.running = true;
     try {
       while (!signal.aborted) {
-        await this.tick(signal);
         try {
+          await this.tick(signal);
           await this.options.clock.sleep(this.options.tickIntervalMs, signal);
         } catch (error) {
           if (!signal.aborted) throw error;

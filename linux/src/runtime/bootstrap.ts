@@ -10,6 +10,7 @@ import {
   FeedingOrchestrator,
   LocalScheduler,
   ManualCommandQueue,
+  ManualFeedingWorker,
   ScheduleSyncService,
 } from '../application/index.js';
 import { serviceMetadata } from '../app.js';
@@ -57,7 +58,7 @@ export interface RunningRuntime extends RuntimeResource {
   readonly deviceStateReporter: DeviceStateReporter;
   readonly scheduleSyncService: ScheduleSyncService;
   readonly commandPoller: CommandPoller;
-  readonly manualCommandQueue: ManualCommandQueue;
+  readonly manualFeedingWorker: ManualFeedingWorker;
   readonly digitalTwin: ReturnType<typeof createDigitalTwin>;
   readonly simulatorControlServer: SimulatorControlServer;
   readonly feedingOrchestrator: FeedingOrchestrator;
@@ -97,7 +98,7 @@ export function bootstrapRuntime(options: BootstrapRuntimeOptions = {}): Running
   let deviceStateReporter: DeviceStateReporter;
   let scheduleSyncService: ScheduleSyncService;
   let commandPoller: CommandPoller;
-  let manualCommandQueue: ManualCommandQueue;
+  let manualFeedingWorker: ManualFeedingWorker;
   let digitalTwin: ReturnType<typeof createDigitalTwin>;
   let simulatorControlServer: SimulatorControlServer;
   let feedingOrchestrator: FeedingOrchestrator;
@@ -141,7 +142,7 @@ export function bootstrapRuntime(options: BootstrapRuntimeOptions = {}): Running
       clock,
       logger,
     });
-    manualCommandQueue = new ManualCommandQueue({
+    const manualCommandQueue = new ManualCommandQueue({
       store: localStore,
       gateway: backendGateway,
       clock,
@@ -168,6 +169,15 @@ export function bootstrapRuntime(options: BootstrapRuntimeOptions = {}): Running
       deviceStateReporter,
       telemetry,
       maximumExecutionMs: config.feedingTimeoutMs,
+    });
+    manualFeedingWorker = new ManualFeedingWorker({
+      queue: manualCommandQueue,
+      feedingOrchestrator,
+      store: localStore,
+      gateway: backendGateway,
+      clock,
+      logger,
+      intervalMs: config.intervals.commandPollMs,
     });
     localScheduler = new LocalScheduler({
       store: localStore,
@@ -201,7 +211,7 @@ export function bootstrapRuntime(options: BootstrapRuntimeOptions = {}): Running
     deviceStateReporter,
     scheduleSyncService,
     commandPoller,
-    manualCommandQueue,
+    manualFeedingWorker,
     digitalTwin,
     simulatorControlServer,
     feedingOrchestrator,

@@ -42,6 +42,8 @@ import {
   type LocalStore,
   type ManualCommand,
   type ManualCommandAckIntent,
+  type ManualCommandWork,
+  type ManualFeedingAttempt,
   type NewOutboxMessage,
   type OutboxKind,
   type OutboxMessage,
@@ -240,6 +242,29 @@ export class SqliteLocalStore implements LocalStore {
     return row ? readManualCommand(row) : null;
   }
 
+  getNextManualCommandWork(serverNow: UtcDateTime | null): ManualCommandWork | null {
+    this.assertOpen();
+    const row = this.database.prepare(`
+      SELECT command_id, feeding_id, phase
+      FROM commands
+      WHERE phase = 'ack_intent'
+        OR (phase IN ('received', 'acked') AND julianday(expires_at) > julianday(?))
+      ORDER BY CASE phase WHEN 'acked' THEN 0 WHEN 'ack_intent' THEN 1 ELSE 2 END,
+               julianday(created_at), command_id
+      LIMIT 1
+    `).get(serverNow === null ? null : utcDateTimeSchema.parse(serverNow));
+    if (!row) return null;
+    const phase = readString(row, 'phase');
+    if (phase !== 'received' && phase !== 'ack_intent' && phase !== 'acked') {
+      throw new Error(`Invalid manual command work phase: ${phase}`);
+    }
+    return {
+      commandId: commandIdSchema.parse(readString(row, 'command_id')),
+      feedingId: feedingIdSchema.parse(readString(row, 'feeding_id')),
+      phase,
+    };
+  }
+
   recordManualCommand(command: ManualCommand): boolean {
     this.assertOpen();
     const commandId = commandIdSchema.parse(command.commandId);
@@ -283,15 +308,16 @@ export class SqliteLocalStore implements LocalStore {
     });
   }
 
-  getNextPendingManualAck(): ManualCommandAckIntent | null {
+  getNextPendingManualAck(commandId?: CommandId): ManualCommandAckIntent | null {
     this.assertOpen();
+    const id = commandId === undefined ? null : commandIdSchema.parse(commandId);
     const row = this.database.prepare(`
       SELECT command_id, feeding_id, expires_at, ack_started_at
       FROM commands
-      WHERE phase = 'ack_intent'
+      WHERE phase = 'ack_intent' AND (? IS NULL OR command_id = ?)
       ORDER BY julianday(ack_started_at), command_id
       LIMIT 1
-    `).get();
+    `).get(id, id);
     return row ? readManualAckIntent(row) : null;
   }
 
@@ -321,6 +347,31 @@ export class SqliteLocalStore implements LocalStore {
     if (sqliteIntegerToNumber(result.changes, 'changed row count') !== 1) {
       throw new Error(`Manual command ${intent.commandId} acknowledgement is not pending`);
     }
+  }
+
+  recordManualActuationIntent(commandId: CommandId, serverNow: UtcDateTime): ManualFeedingAttempt | null {
+    this.assertOpen();
+    const id = commandIdSchema.parse(commandId);
+    const now = utcDateTimeSchema.parse(serverNow);
+    return this.transaction(() => {
+      const row = this.database.prepare(`
+        UPDATE commands
+        SET phase = 'actuation_intent', updated_at = ?
+        WHERE command_id = ? AND phase = 'acked' AND julianday(expires_at) > julianday(?)
+        RETURNING command_id, feeding_id, created_at, expires_at, ack_started_at,
+                  json_extract(payload_json, '$.portion_grams') AS portion_grams
+      `).get(now, id, now);
+      if (!row) return null;
+
+      const { feedingId, portionGrams, createdAt } = readManualCommand(row);
+      const startedAt = utcDateTimeSchema.parse(readString(row, 'ack_started_at'));
+      this.database.prepare(`
+        INSERT INTO feedings(
+          feeding_id, source, command_id, portion_grams_cents, status, created_at, started_at
+        ) VALUES (?, 'manual', ?, ?, 'running', ?, ?)
+      `).run(feedingId, id, gramsToCents(portionGrams), createdAt, startedAt);
+      return { source: 'manual', commandId: id, feedingId, scheduleId: null, portionGrams, createdAt, startedAt };
+    });
   }
 
   getFeeding(feedingId: FeedingId): StoredLocalFeeding | null {
@@ -462,6 +513,16 @@ export class SqliteLocalStore implements LocalStore {
       );
       if (sqliteIntegerToNumber(result.changes, 'changed row count') !== 1) {
         throw new FeedingStateConflictError(completion.feedingId);
+      }
+      if (existing.source === 'manual') {
+        const command = this.database.prepare(`
+          UPDATE commands
+          SET phase = 'terminal', updated_at = ?
+          WHERE command_id = ? AND feeding_id = ? AND phase = 'actuation_intent' AND ack_started_at = ?
+        `).run(completion.finishedAt, existing.commandId, existing.feedingId, completion.startedAt);
+        if (sqliteIntegerToNumber(command.changes, 'changed row count') !== 1) {
+          throw new FeedingStateConflictError(completion.feedingId);
+        }
       }
       return this.enqueueOutboxWithinTransaction(outbox);
     });

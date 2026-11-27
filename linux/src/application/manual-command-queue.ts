@@ -9,11 +9,12 @@ import {
   type LocalStore,
   type ManualCommand,
   type ManualCommandAckIntent,
+  type ManualCommandWork,
 } from '../ports/index.js';
 
 export interface ManualCommandQueueOptions {
   readonly store: Pick<LocalStore,
-    'getLastHeartbeat' | 'getNextManualCommand' | 'getNextPendingManualAck'
+    'getLastHeartbeat' | 'getNextManualCommand' | 'getNextManualCommandWork' | 'getNextPendingManualAck'
     | 'recordManualAckIntent' | 'resolveManualAck'
   >;
   readonly gateway: Pick<BackendGateway, 'acknowledgeCommand'>;
@@ -29,6 +30,10 @@ export class ManualCommandQueue {
   getNext(): ManualCommand | null {
     const serverNow = this.readServerNow();
     return serverNow === null ? null : this.options.store.getNextManualCommand(serverNow.toISOString());
+  }
+
+  getNextForExecution(): ManualCommandWork | null {
+    return this.options.store.getNextManualCommandWork(this.readServerNow()?.toISOString() ?? null);
   }
 
   async acknowledgeFirst(
@@ -50,10 +55,10 @@ export class ManualCommandQueue {
     return this.sendAck(intent);
   }
 
-  async retryPendingAck(): Promise<BackendGatewayResult<AcknowledgeCommandResponse> | null> {
+  async retryPendingAck(commandId?: CommandId): Promise<BackendGatewayResult<AcknowledgeCommandResponse> | null> {
     if (this.acknowledging) return null;
     // A committed intent may already have been accepted, regardless of the deadline.
-    const intent = this.options.store.getNextPendingManualAck();
+    const intent = this.options.store.getNextPendingManualAck(commandId);
     return intent === null ? null : this.sendAck(intent);
   }
 
@@ -76,10 +81,7 @@ export class ManualCommandQueue {
       this.options.store.resolveManualAck(intent, 'acked');
       return response;
     } catch (error) {
-      if (
-        error instanceof BackendGatewayError
-        && (error.disposition === 'quarantine' || error.statusCode === 400 || error.statusCode === 404)
-      ) {
+      if (isManualAckRefusal(error)) {
         this.options.store.resolveManualAck(intent, 'quarantined');
       }
       throw error;
@@ -88,7 +90,7 @@ export class ManualCommandQueue {
     }
   }
 
-  private readServerNow(): Date | null {
+  readServerNow(): Date | null {
     const heartbeat = this.options.store.getLastHeartbeat();
     if (
       heartbeat?.deliveryState !== 'delivered'
@@ -102,4 +104,9 @@ export class ManualCommandQueue {
     if (!Number.isFinite(serverNow.getTime())) throw new Error('Clock returned an invalid date');
     return serverNow;
   }
+}
+
+export function isManualAckRefusal(error: unknown): boolean {
+  return error instanceof BackendGatewayError
+    && (error.disposition === 'quarantine' || error.statusCode === 400 || error.statusCode === 404);
 }

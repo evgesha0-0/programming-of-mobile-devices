@@ -183,9 +183,32 @@ test('retryable scheduled event delivery keeps exact payload in outbox', async (
   assert.deepEqual(JSON.parse(outbox[0]?.payload ?? '{}'), harness.delivery.events[0]);
 });
 
+test('scheduler stops cleanly while waiting for the manual feeding lease', async (t) => {
+  const harness = schedulerHarness(t, {
+    now: '2026-11-23T08:31:00.000Z',
+    schedules: [schedule()],
+    maximumLatenessMs: 300_000,
+  });
+  const controller = new AbortController();
+  const manualLease = await harness.executionLock.acquire('manual-ack', controller.signal);
+  try {
+    const running = harness.scheduler.run(controller.signal);
+    const claimed = harness.store.getScheduleOccurrence(`${firstScheduleId}:2026-11-23T08:30:00[UTC]`);
+    assert.ok(claimed);
+    controller.abort();
+    await running;
+    assert.equal(harness.store.getFeeding(claimed.feedingId), null);
+    assert.equal(harness.delivery.events.length, 0);
+  } finally {
+    controller.abort();
+    manualLease.release();
+  }
+});
+
 interface SchedulerHarness {
   readonly store: SqliteLocalStore;
   readonly scheduler: LocalScheduler;
+  readonly executionLock: ReturnType<typeof createDigitalTwin>['executionLock'];
   readonly delivery: {
     events: ScheduledFeedingEventRequest[];
     sawPendingOutbox: boolean;
@@ -272,6 +295,7 @@ function schedulerHarness(
   return {
     store,
     delivery,
+    executionLock: twin.executionLock,
     scheduler: new LocalScheduler({
       store,
       backendGateway,

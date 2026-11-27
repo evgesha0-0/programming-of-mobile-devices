@@ -77,6 +77,10 @@ export interface ManualCommandAckIntent extends Pick<ManualCommand, 'commandId' 
   readonly startedAt: UtcDateTime;
 }
 
+export interface ManualCommandWork extends Pick<ManualCommand, 'commandId' | 'feedingId'> {
+  readonly phase: 'received' | 'ack_intent' | 'acked';
+}
+
 interface FeedingIntentBase {
   readonly feedingId: FeedingId;
   readonly portionGrams: number;
@@ -87,6 +91,10 @@ export interface ManualFeedingIntent extends FeedingIntentBase {
   readonly source: 'manual';
   readonly commandId: CommandId;
   readonly scheduleId: null;
+}
+
+export interface ManualFeedingAttempt extends ManualFeedingIntent {
+  readonly startedAt: UtcDateTime;
 }
 
 export interface ScheduledFeedingIntent extends FeedingIntentBase {
@@ -140,9 +148,11 @@ export interface LocalStore {
   getManualCommand(commandId: CommandId): ManualCommand | null;
   getNextManualCommand(serverNow: UtcDateTime): ManualCommand | null;
   recordManualCommand(command: ManualCommand): boolean;
-  getNextPendingManualAck(): ManualCommandAckIntent | null;
+  getNextManualCommandWork(serverNow: UtcDateTime | null): ManualCommandWork | null;
+  getNextPendingManualAck(commandId?: CommandId): ManualCommandAckIntent | null;
   recordManualAckIntent(commandId: CommandId, startedAt: UtcDateTime): ManualCommandAckIntent | null;
   resolveManualAck(intent: ManualCommandAckIntent, phase: 'acked' | 'quarantined'): void;
+  recordManualActuationIntent(commandId: CommandId, serverNow: UtcDateTime): ManualFeedingAttempt | null;
   getFeeding(feedingId: FeedingId): StoredLocalFeeding | null;
   recordFeedingIntent(intent: FeedingIntent): boolean;
   markFeedingRunning(feedingId: FeedingId, startedAt: UtcDateTime): boolean;
