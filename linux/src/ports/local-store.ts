@@ -65,6 +65,14 @@ export interface HeartbeatDeliveryReceipt {
   readonly requestId: string | null;
 }
 
+export interface ManualCommand {
+  readonly commandId: CommandId;
+  readonly feedingId: FeedingId;
+  readonly portionGrams: number;
+  readonly createdAt: UtcDateTime;
+  readonly expiresAt: UtcDateTime;
+}
+
 interface FeedingIntentBase {
   readonly feedingId: FeedingId;
   readonly portionGrams: number;
@@ -125,6 +133,8 @@ export interface LocalStore {
   getLastHeartbeat(): StoredHeartbeat | null;
   savePendingHeartbeat(payload: ReportDeviceStateRequest): void;
   markHeartbeatDelivered(receipt: HeartbeatDeliveryReceipt): boolean;
+  getManualCommand(commandId: CommandId): ManualCommand | null;
+  recordManualCommand(command: ManualCommand): boolean;
   getFeeding(feedingId: FeedingId): StoredLocalFeeding | null;
   recordFeedingIntent(intent: FeedingIntent): boolean;
   markFeedingRunning(feedingId: FeedingId, startedAt: UtcDateTime): boolean;
@@ -137,6 +147,13 @@ export interface LocalStore {
   listPendingOutbox(limit: number, availableAt: UtcDateTime): OutboxMessage[];
   rescheduleOutbox(id: number, nextAttemptAt: UtcDateTime, lastError: string): boolean;
   markOutboxDelivered(id: number, deliveredAt: UtcDateTime): boolean;
+}
+
+export class ManualCommandConflictError extends Error {
+  constructor(commandId: CommandId) {
+    super(`Manual command ${commandId} has conflicting content or feeding identity`);
+    this.name = 'ManualCommandConflictError';
+  }
 }
 
 export class FeedingIntentConflictError extends Error {

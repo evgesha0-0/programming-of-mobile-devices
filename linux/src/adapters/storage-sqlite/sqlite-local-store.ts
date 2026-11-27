@@ -20,6 +20,7 @@ import {
   scheduleIdSchema,
   timezoneSchema,
   utcDateTimeSchema,
+  type CommandId,
   type FeedingId,
   type UtcDateTime,
 } from '../../domain/index.js';
@@ -27,6 +28,7 @@ import {
   FeedingIntentConflictError,
   FeedingStateConflictError,
   HeartbeatPayloadConflictError,
+  ManualCommandConflictError,
   NonMonotonicHeartbeatError,
   OutboxConflictError,
   ScheduleOccurrenceConflictError,
@@ -38,6 +40,7 @@ import {
   type LocalSchedule,
   type LocalScheduleSnapshot,
   type LocalStore,
+  type ManualCommand,
   type NewOutboxMessage,
   type OutboxKind,
   type OutboxMessage,
@@ -209,6 +212,68 @@ export class SqliteLocalStore implements LocalStore {
         AND delivery_state = 'pending'
     `).run(serverTime, receipt.clockOffsetMs, receipt.requestId, reportedAt);
     return sqliteIntegerToNumber(result.changes, 'changed row count') === 1;
+  }
+
+  getManualCommand(commandId: CommandId): ManualCommand | null {
+    this.assertOpen();
+    const validatedCommandId = commandIdSchema.parse(commandId);
+    const row = this.database.prepare(`
+      SELECT command_id, feeding_id, created_at, expires_at,
+             json_extract(payload_json, '$.portion_grams') AS portion_grams
+      FROM commands
+      WHERE command_id = ?
+    `).get(validatedCommandId);
+    if (!row) return null;
+    return {
+      commandId: commandIdSchema.parse(readString(row, 'command_id')),
+      feedingId: feedingIdSchema.parse(readString(row, 'feeding_id')),
+      portionGrams: portionGramsSchema.parse(row.portion_grams),
+      createdAt: utcDateTimeSchema.parse(readString(row, 'created_at')),
+      expiresAt: utcDateTimeSchema.parse(readString(row, 'expires_at')),
+    };
+  }
+
+  recordManualCommand(command: ManualCommand): boolean {
+    this.assertOpen();
+    const commandId = commandIdSchema.parse(command.commandId);
+    const feedingId = feedingIdSchema.parse(command.feedingId);
+    const portionGrams = portionGramsSchema.parse(command.portionGrams);
+    const createdAt = utcDateTimeSchema.parse(command.createdAt);
+    const expiresAt = utcDateTimeSchema.parse(command.expiresAt);
+    if (Date.parse(expiresAt) <= Date.parse(createdAt)) {
+      throw new TypeError('Command expiration must be later than creation time');
+    }
+    const payload = JSON.stringify({
+      command_id: commandId,
+      feeding_id: feedingId,
+      portion_grams: portionGrams,
+      created_at: createdAt,
+      expires_at: expiresAt,
+    });
+    const fingerprint = createHash('sha256').update(payload).digest('hex');
+
+    return this.transaction(() => {
+      const existing = this.database.prepare(`
+        SELECT command_id, fingerprint FROM commands
+        WHERE command_id = ? OR feeding_id = ?
+      `).get(commandId, feedingId);
+      if (existing) {
+        if (
+          readString(existing, 'command_id') !== commandId
+          || readString(existing, 'fingerprint') !== fingerprint
+        ) {
+          throw new ManualCommandConflictError(commandId);
+        }
+        return false;
+      }
+
+      this.database.prepare(`
+        INSERT INTO commands(
+          command_id, feeding_id, fingerprint, payload_json, expires_at, phase, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, 'received', ?, ?)
+      `).run(commandId, feedingId, fingerprint, payload, expiresAt, createdAt, new Date().toISOString());
+      return true;
+    });
   }
 
   getFeeding(feedingId: FeedingId): StoredLocalFeeding | null {

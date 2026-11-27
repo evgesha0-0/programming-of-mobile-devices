@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 
 import { SqliteLocalStore } from '../../src/adapters/storage-sqlite/index.js';
 import {
+  commandIdSchema,
   daysOfWeekSchema,
   feedingIdSchema,
   scheduleIdSchema,
@@ -14,18 +15,27 @@ import {
 } from '../../src/domain/index.js';
 import {
   LocalStoreLockedError,
+  ManualCommandConflictError,
   OutboxConflictError,
   ScheduleOccurrenceConflictError,
   ScheduleRevisionConflictError,
   StaleScheduleRevisionError,
   type LocalSchedule,
   type LocalScheduleSnapshot,
+  type ManualCommand,
 } from '../../src/ports/index.js';
 
 const firstScheduleId = scheduleIdSchema.parse('36ee8225-cd00-46ea-b6ef-db9e66c0946b');
 const secondScheduleId = scheduleIdSchema.parse('811f98b6-e0f9-40ad-9b5e-46d501f1a1d3');
 const firstFeedingId = feedingIdSchema.parse('b01f6503-fad1-4d5d-b734-864159d9b1e6');
 const secondFeedingId = feedingIdSchema.parse('a552a367-1de4-4381-a238-d93f1f1da654');
+const manualCommand: ManualCommand = {
+  commandId: commandIdSchema.parse('ec5391dd-edf4-4341-af87-356f2ac0c6fe'),
+  feedingId: firstFeedingId,
+  portionGrams: 45.57,
+  createdAt: utcDateTimeSchema.parse('2026-10-29T08:20:00Z'),
+  expiresAt: utcDateTimeSchema.parse('2026-10-29T08:25:00Z'),
+};
 const initialMigrationPath = resolve(
   dirname(fileURLToPath(import.meta.url)),
   '../../migrations/001_initial.sql',
@@ -67,6 +77,42 @@ test('SQLite store rejects a modified applied migration and releases its lock', 
   copyFileSync(initialMigrationPath, copiedMigration);
   const reopened = SqliteLocalStore.open({ databasePath, migrationsDirectory });
   reopened.close();
+});
+
+test('manual command survives reopen and exact replays do not insert again', (t) => {
+  const databasePath = temporaryDatabasePath(t);
+  const store = SqliteLocalStore.open({ databasePath });
+  assert.equal(store.getManualCommand(manualCommand.commandId), null);
+  assert.equal(store.recordManualCommand(manualCommand), true);
+  assert.equal(store.recordManualCommand({ ...manualCommand }), false);
+  store.close();
+
+  const reopened = SqliteLocalStore.open({ databasePath });
+  assert.deepEqual(reopened.getManualCommand(manualCommand.commandId), manualCommand);
+  assert.equal(reopened.recordManualCommand(manualCommand), false);
+  reopened.close();
+});
+
+test('manual command rejects conflicting content and feeding identity', (t) => {
+  const store = SqliteLocalStore.open({ databasePath: temporaryDatabasePath(t) });
+  const otherCommandId = commandIdSchema.parse('b1e933b3-523a-44a6-bdcf-56d5eec6bfcb');
+  store.recordManualCommand(manualCommand);
+
+  for (const changed of [
+    { feedingId: secondFeedingId },
+    { portionGrams: 45.58 },
+    { createdAt: utcDateTimeSchema.parse('2026-10-29T08:21:00Z') },
+    { expiresAt: utcDateTimeSchema.parse('2026-10-29T08:26:00Z') },
+    { commandId: otherCommandId },
+  ]) {
+    assert.throws(
+      () => store.recordManualCommand({ ...manualCommand, ...changed }),
+      ManualCommandConflictError,
+    );
+  }
+  assert.deepEqual(store.getManualCommand(manualCommand.commandId), manualCommand);
+  assert.equal(store.getManualCommand(otherCommandId), null);
+  store.close();
 });
 
 test('schedule snapshot is atomically replaced and survives restart', (t) => {
