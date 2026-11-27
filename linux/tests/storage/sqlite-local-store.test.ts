@@ -45,7 +45,7 @@ test('SQLite store applies migrations and enforces a single process lock', (t) =
   const databasePath = temporaryDatabasePath(t);
   const store = SqliteLocalStore.open({ databasePath });
 
-  assert.equal(store.getSchemaVersion(), 2);
+  assert.equal(store.getSchemaVersion(), 3);
   assert.throws(
     () => SqliteLocalStore.open({ databasePath }),
     LocalStoreLockedError,
@@ -53,7 +53,7 @@ test('SQLite store applies migrations and enforces a single process lock', (t) =
 
   store.close();
   const reopened = SqliteLocalStore.open({ databasePath });
-  assert.equal(reopened.getSchemaVersion(), 2);
+  assert.equal(reopened.getSchemaVersion(), 3);
   reopened.close();
 });
 
@@ -79,17 +79,26 @@ test('SQLite store rejects a modified applied migration and releases its lock', 
   reopened.close();
 });
 
-test('manual command survives reopen and exact replays do not insert again', (t) => {
-  const databasePath = temporaryDatabasePath(t);
-  const store = SqliteLocalStore.open({ databasePath });
+test('manual command survives a schema upgrade and exact replays do not insert again', (t) => {
+  const directory = temporaryDirectory(t);
+  const databasePath = join(directory, 'device.sqlite');
+  const migrationsDirectory = join(directory, 'legacy-migrations');
+  mkdirSync(migrationsDirectory);
+  for (const migration of ['001_initial.sql', '002_device_heartbeat.sql']) {
+    copyFileSync(join(dirname(initialMigrationPath), migration), join(migrationsDirectory, migration));
+  }
+  const store = SqliteLocalStore.open({ databasePath, migrationsDirectory });
+  assert.equal(store.getSchemaVersion(), 2);
   assert.equal(store.getManualCommand(manualCommand.commandId), null);
   assert.equal(store.recordManualCommand(manualCommand), true);
   assert.equal(store.recordManualCommand({ ...manualCommand }), false);
   store.close();
 
   const reopened = SqliteLocalStore.open({ databasePath });
+  assert.equal(reopened.getSchemaVersion(), 3);
   assert.deepEqual(reopened.getManualCommand(manualCommand.commandId), manualCommand);
   assert.equal(reopened.recordManualCommand(manualCommand), false);
+  assert.equal(reopened.getNextPendingManualAck(), null);
   reopened.close();
 });
 

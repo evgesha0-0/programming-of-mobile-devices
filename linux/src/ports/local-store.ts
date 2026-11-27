@@ -73,6 +73,10 @@ export interface ManualCommand {
   readonly expiresAt: UtcDateTime;
 }
 
+export interface ManualCommandAckIntent extends Pick<ManualCommand, 'commandId' | 'feedingId' | 'expiresAt'> {
+  readonly startedAt: UtcDateTime;
+}
+
 interface FeedingIntentBase {
   readonly feedingId: FeedingId;
   readonly portionGrams: number;
@@ -136,6 +140,9 @@ export interface LocalStore {
   getManualCommand(commandId: CommandId): ManualCommand | null;
   getNextManualCommand(serverNow: UtcDateTime): ManualCommand | null;
   recordManualCommand(command: ManualCommand): boolean;
+  getNextPendingManualAck(): ManualCommandAckIntent | null;
+  recordManualAckIntent(commandId: CommandId, startedAt: UtcDateTime): ManualCommandAckIntent | null;
+  resolveManualAck(intent: ManualCommandAckIntent, phase: 'acked' | 'quarantined'): void;
   getFeeding(feedingId: FeedingId): StoredLocalFeeding | null;
   recordFeedingIntent(intent: FeedingIntent): boolean;
   markFeedingRunning(feedingId: FeedingId, startedAt: UtcDateTime): boolean;

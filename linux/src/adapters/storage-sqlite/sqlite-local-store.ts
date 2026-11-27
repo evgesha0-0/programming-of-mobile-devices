@@ -41,6 +41,7 @@ import {
   type LocalScheduleSnapshot,
   type LocalStore,
   type ManualCommand,
+  type ManualCommandAckIntent,
   type NewOutboxMessage,
   type OutboxKind,
   type OutboxMessage,
@@ -280,6 +281,46 @@ export class SqliteLocalStore implements LocalStore {
       `).run(commandId, feedingId, fingerprint, payload, expiresAt, createdAt, new Date().toISOString());
       return true;
     });
+  }
+
+  getNextPendingManualAck(): ManualCommandAckIntent | null {
+    this.assertOpen();
+    const row = this.database.prepare(`
+      SELECT command_id, feeding_id, expires_at, ack_started_at
+      FROM commands
+      WHERE phase = 'ack_intent'
+      ORDER BY julianday(ack_started_at), command_id
+      LIMIT 1
+    `).get();
+    return row ? readManualAckIntent(row) : null;
+  }
+
+  recordManualAckIntent(commandId: CommandId, startedAt: UtcDateTime): ManualCommandAckIntent | null {
+    this.assertOpen();
+    const id = commandIdSchema.parse(commandId);
+    const timestamp = utcDateTimeSchema.parse(startedAt);
+    return this.transaction(() => {
+      const row = this.database.prepare(`
+        UPDATE commands
+        SET phase = 'ack_intent', ack_started_at = ?, updated_at = ?
+        WHERE command_id = ? AND phase = 'received' AND ack_started_at IS NULL
+          AND julianday(created_at) <= julianday(?) AND julianday(expires_at) > julianday(?)
+        RETURNING command_id, feeding_id, expires_at, ack_started_at
+      `).get(timestamp, new Date().toISOString(), id, timestamp, timestamp);
+      return row ? readManualAckIntent(row) : null;
+    });
+  }
+
+  resolveManualAck(intent: ManualCommandAckIntent, phase: 'acked' | 'quarantined'): void {
+    this.assertOpen();
+    const result = this.database.prepare(`
+      UPDATE commands
+      SET phase = ?, updated_at = ?
+      WHERE command_id = ? AND feeding_id = ? AND ack_started_at = ? AND phase = 'ack_intent'
+    `).run(phase, new Date().toISOString(), intent.commandId, intent.feedingId, intent.startedAt);
+    if (sqliteIntegerToNumber(result.changes, 'changed row count') !== 1) {
+      throw new Error(`Manual command ${intent.commandId} acknowledgement is not pending`);
+    }
   }
 
   getFeeding(feedingId: FeedingId): StoredLocalFeeding | null {
@@ -795,6 +836,15 @@ function readManualCommand(row: Record<string, unknown>): ManualCommand {
     portionGrams: portionGramsSchema.parse(row.portion_grams),
     createdAt: utcDateTimeSchema.parse(readString(row, 'created_at')),
     expiresAt: utcDateTimeSchema.parse(readString(row, 'expires_at')),
+  };
+}
+
+function readManualAckIntent(row: Record<string, unknown>): ManualCommandAckIntent {
+  return {
+    commandId: commandIdSchema.parse(readString(row, 'command_id')),
+    feedingId: feedingIdSchema.parse(readString(row, 'feeding_id')),
+    expiresAt: utcDateTimeSchema.parse(readString(row, 'expires_at')),
+    startedAt: utcDateTimeSchema.parse(readString(row, 'ack_started_at')),
   };
 }
 
