@@ -223,14 +223,20 @@ export class SqliteLocalStore implements LocalStore {
       FROM commands
       WHERE command_id = ?
     `).get(validatedCommandId);
-    if (!row) return null;
-    return {
-      commandId: commandIdSchema.parse(readString(row, 'command_id')),
-      feedingId: feedingIdSchema.parse(readString(row, 'feeding_id')),
-      portionGrams: portionGramsSchema.parse(row.portion_grams),
-      createdAt: utcDateTimeSchema.parse(readString(row, 'created_at')),
-      expiresAt: utcDateTimeSchema.parse(readString(row, 'expires_at')),
-    };
+    return row ? readManualCommand(row) : null;
+  }
+
+  getNextManualCommand(serverNow: UtcDateTime): ManualCommand | null {
+    this.assertOpen();
+    const row = this.database.prepare(`
+      SELECT command_id, feeding_id, created_at, expires_at,
+             json_extract(payload_json, '$.portion_grams') AS portion_grams
+      FROM commands
+      WHERE phase = 'received' AND julianday(expires_at) > julianday(?)
+      ORDER BY julianday(created_at), command_id
+      LIMIT 1
+    `).get(utcDateTimeSchema.parse(serverNow));
+    return row ? readManualCommand(row) : null;
   }
 
   recordManualCommand(command: ManualCommand): boolean {
@@ -780,6 +786,16 @@ function heartbeatPayloadEquals(
     && left.firmware_version === right.firmware_version
     && left.error_code === right.error_code
     && left.error_message === right.error_message;
+}
+
+function readManualCommand(row: Record<string, unknown>): ManualCommand {
+  return {
+    commandId: commandIdSchema.parse(readString(row, 'command_id')),
+    feedingId: feedingIdSchema.parse(readString(row, 'feeding_id')),
+    portionGrams: portionGramsSchema.parse(row.portion_grams),
+    createdAt: utcDateTimeSchema.parse(readString(row, 'created_at')),
+    expiresAt: utcDateTimeSchema.parse(readString(row, 'expires_at')),
+  };
 }
 
 function validateFeedingIntent(intent: FeedingIntent): void {

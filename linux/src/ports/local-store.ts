@@ -134,6 +134,7 @@ export interface LocalStore {
   savePendingHeartbeat(payload: ReportDeviceStateRequest): void;
   markHeartbeatDelivered(receipt: HeartbeatDeliveryReceipt): boolean;
   getManualCommand(commandId: CommandId): ManualCommand | null;
+  getNextManualCommand(serverNow: UtcDateTime): ManualCommand | null;
   recordManualCommand(command: ManualCommand): boolean;
   getFeeding(feedingId: FeedingId): StoredLocalFeeding | null;
   recordFeedingIntent(intent: FeedingIntent): boolean;

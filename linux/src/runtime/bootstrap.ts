@@ -9,6 +9,7 @@ import {
   DeviceStateReporter,
   FeedingOrchestrator,
   LocalScheduler,
+  ManualCommandQueue,
   ScheduleSyncService,
 } from '../application/index.js';
 import { serviceMetadata } from '../app.js';
@@ -56,6 +57,7 @@ export interface RunningRuntime extends RuntimeResource {
   readonly deviceStateReporter: DeviceStateReporter;
   readonly scheduleSyncService: ScheduleSyncService;
   readonly commandPoller: CommandPoller;
+  readonly manualCommandQueue: ManualCommandQueue;
   readonly digitalTwin: ReturnType<typeof createDigitalTwin>;
   readonly simulatorControlServer: SimulatorControlServer;
   readonly feedingOrchestrator: FeedingOrchestrator;
@@ -95,6 +97,7 @@ export function bootstrapRuntime(options: BootstrapRuntimeOptions = {}): Running
   let deviceStateReporter: DeviceStateReporter;
   let scheduleSyncService: ScheduleSyncService;
   let commandPoller: CommandPoller;
+  let manualCommandQueue: ManualCommandQueue;
   let digitalTwin: ReturnType<typeof createDigitalTwin>;
   let simulatorControlServer: SimulatorControlServer;
   let feedingOrchestrator: FeedingOrchestrator;
@@ -137,6 +140,12 @@ export function bootstrapRuntime(options: BootstrapRuntimeOptions = {}): Running
       store: localStore,
       clock,
       logger,
+    });
+    manualCommandQueue = new ManualCommandQueue({
+      store: localStore,
+      gateway: backendGateway,
+      clock,
+      maxClockSkewMs: config.maxClockSkewMs,
     });
     const telemetry = new LoggerTelemetry(logger);
     digitalTwin = createDigitalTwin({
@@ -192,6 +201,7 @@ export function bootstrapRuntime(options: BootstrapRuntimeOptions = {}): Running
     deviceStateReporter,
     scheduleSyncService,
     commandPoller,
+    manualCommandQueue,
     digitalTwin,
     simulatorControlServer,
     feedingOrchestrator,
