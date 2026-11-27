@@ -5,6 +5,7 @@ import {
   type RuntimeConfig,
 } from '../config/index.js';
 import {
+  CommandPoller,
   DeviceStateReporter,
   FeedingOrchestrator,
   LocalScheduler,
@@ -54,6 +55,7 @@ export interface RunningRuntime extends RuntimeResource {
   readonly backendGateway: BackendGateway;
   readonly deviceStateReporter: DeviceStateReporter;
   readonly scheduleSyncService: ScheduleSyncService;
+  readonly commandPoller: CommandPoller;
   readonly digitalTwin: ReturnType<typeof createDigitalTwin>;
   readonly simulatorControlServer: SimulatorControlServer;
   readonly feedingOrchestrator: FeedingOrchestrator;
@@ -92,6 +94,7 @@ export function bootstrapRuntime(options: BootstrapRuntimeOptions = {}): Running
   let backendGateway: BackendGateway;
   let deviceStateReporter: DeviceStateReporter;
   let scheduleSyncService: ScheduleSyncService;
+  let commandPoller: CommandPoller;
   let digitalTwin: ReturnType<typeof createDigitalTwin>;
   let simulatorControlServer: SimulatorControlServer;
   let feedingOrchestrator: FeedingOrchestrator;
@@ -122,6 +125,14 @@ export function bootstrapRuntime(options: BootstrapRuntimeOptions = {}): Running
     scheduleSyncService = new ScheduleSyncService({
       deviceId: config.deviceId,
       syncIntervalMs: config.intervals.scheduleSyncMs,
+      gateway: backendGateway,
+      store: localStore,
+      clock,
+      logger,
+    });
+    commandPoller = new CommandPoller({
+      deviceId: config.deviceId,
+      pollIntervalMs: config.intervals.commandPollMs,
       gateway: backendGateway,
       store: localStore,
       clock,
@@ -180,6 +191,7 @@ export function bootstrapRuntime(options: BootstrapRuntimeOptions = {}): Running
     backendGateway,
     deviceStateReporter,
     scheduleSyncService,
+    commandPoller,
     digitalTwin,
     simulatorControlServer,
     feedingOrchestrator,

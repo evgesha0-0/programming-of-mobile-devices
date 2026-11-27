@@ -32,6 +32,11 @@ test('runtime config validates and freezes direct environment settings', () => {
   assert.equal(JSON.stringify(runtimeConfigSummary(config)).includes(deviceToken), false);
 });
 
+test('runtime config reads a custom command poll interval', () => {
+  const config = loadRuntimeConfig({ ...validEnvironment(), COMMAND_POLL_INTERVAL_MS: '2500' });
+  assert.equal(config.intervals.commandPollMs, 2_500);
+});
+
 test('runtime config reads DEVICE_TOKEN_FILE without retaining its path', () => {
   const cwd = resolve('runtime-root');
   let requestedPath = '';
@@ -63,6 +68,7 @@ test('runtime config rejects unsafe values without exposing the token', () => {
     { ...validEnvironment(), SQLITE_PATH: ':memory:' },
     { ...validEnvironment(), HARDWARE_ADAPTER: 'gpio' },
     { ...validEnvironment(), HEARTBEAT_INTERVAL_MS: '999' },
+    { ...validEnvironment(), COMMAND_POLL_INTERVAL_MS: '999' },
     { ...validEnvironment(), BACKOFF_INITIAL_MS: '60001' },
     { ...validEnvironment(), MAX_CLOCK_SKEW_MS: '300001' },
   ];
@@ -118,7 +124,6 @@ function validEnvironment(): Record<string, string | undefined> {
     SQLITE_PATH: './data/device.sqlite',
     HEARTBEAT_INTERVAL_MS: '30000',
     SCHEDULE_SYNC_INTERVAL_MS: '60000',
-    COMMAND_POLL_INTERVAL_MS: '5000',
     REQUEST_TIMEOUT_MS: '10000',
     BACKOFF_INITIAL_MS: '1000',
     BACKOFF_MAX_MS: '60000',

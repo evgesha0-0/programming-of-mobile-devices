@@ -1,3 +1,4 @@
+export * from './command-poller.js';
 export * from './device-state-reporter.js';
 export * from './feeding-orchestrator.js';
 export * from './local-scheduler.js';
