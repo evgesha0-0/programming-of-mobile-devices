@@ -55,7 +55,6 @@ export interface RunningRuntime extends RuntimeResource {
   readonly config: RuntimeConfig;
   readonly logger: JsonLogger;
   readonly localStore: LocalStore;
-  readonly backendGateway: BackendGateway;
   readonly deviceStateReporter: DeviceStateReporter;
   readonly scheduleSyncService: ScheduleSyncService;
   readonly commandPoller: CommandPoller;
@@ -65,6 +64,7 @@ export interface RunningRuntime extends RuntimeResource {
   readonly simulatorControlServer: SimulatorControlServer;
   readonly feedingOrchestrator: FeedingOrchestrator;
   readonly localScheduler: LocalScheduler;
+  closeNetwork(): void;
 }
 
 const defaultDependencies: RuntimeDependencies = Object.freeze({
@@ -106,6 +106,12 @@ export function bootstrapRuntime(options: BootstrapRuntimeOptions = {}): Running
   let simulatorControlServer: SimulatorControlServer;
   let feedingOrchestrator: FeedingOrchestrator;
   let localScheduler: LocalScheduler;
+  let networkClosed = false;
+  const closeNetwork = (): void => {
+    if (networkClosed) return;
+    networkClosed = true;
+    backendGateway.close();
+  };
   try {
     localStore = dependencies.openStore(config.sqlitePath);
     resources.push(localStore);
@@ -117,7 +123,7 @@ export function bootstrapRuntime(options: BootstrapRuntimeOptions = {}): Running
       backoffInitialMs: config.backoff.initialMs,
       backoffMaxMs: config.backoff.maxMs,
     }, logger);
-    resources.push(backendGateway);
+    resources.push({ close: closeNetwork });
     const clock = new SystemClock();
     deviceStateReporter = new DeviceStateReporter({
       deviceId: config.deviceId,
@@ -218,7 +224,6 @@ export function bootstrapRuntime(options: BootstrapRuntimeOptions = {}): Running
     config,
     logger,
     localStore,
-    backendGateway,
     deviceStateReporter,
     scheduleSyncService,
     commandPoller,
@@ -228,6 +233,7 @@ export function bootstrapRuntime(options: BootstrapRuntimeOptions = {}): Running
     simulatorControlServer,
     feedingOrchestrator,
     localScheduler,
+    closeNetwork,
     close(): void {
       if (closed) return;
       closed = true;
