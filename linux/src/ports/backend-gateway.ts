@@ -27,12 +27,13 @@ export interface BackendGateway {
     commandId: CommandId,
     request: AcknowledgeCommandRequest,
   ): Promise<BackendGatewayResult<AcknowledgeCommandResponse>>;
+  // Stored JSON is sent verbatim in one HTTP attempt; the outbox owns its retries.
   reportManualFeedingResult(
     feedingId: FeedingId,
-    request: ManualFeedingResultRequest,
+    request: ManualFeedingResultRequest | string,
   ): Promise<BackendGatewayResult<ManualFeedingResultResponse>>;
   reportScheduledFeedingEvent(
-    request: ScheduledFeedingEventRequest,
+    request: ScheduledFeedingEventRequest | string,
   ): Promise<BackendGatewayResult<ScheduledFeedingEventResponse>>;
   close(): void;
 }

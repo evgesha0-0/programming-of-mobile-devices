@@ -18,14 +18,13 @@ import {
   scheduleIdSchema,
   utcDateTimeSchema,
 } from '../../src/domain/index.js';
-import type { ScheduledFeedingEventRequest } from '../../src/contracts/index.js';
+import { scheduledFeedingEventRequestSchema } from '../../src/contracts/index.js';
 import { createJsonLogger, LoggerTelemetry } from '../../src/observability/index.js';
 import type {
   BackendGateway,
   LocalSchedule,
   LocalScheduleSnapshot,
 } from '../../src/ports/index.js';
-import { BackendConflictError, BackendTransportError } from '../../src/ports/index.js';
 import { createDigitalTwin } from '../../src/simulator/index.js';
 
 const deviceId = deviceIdSchema.parse('d6d174f4-e79f-49d1-9476-78bc99483752');
@@ -96,7 +95,7 @@ test('inactive, deleted and excessively late schedules are not due', () => {
   assert.equal(resolveDueOccurrences(schedule(), now, 300_000).length, 0);
 });
 
-test('scheduler claims feeding_id before execution and emits one history event', async (t) => {
+test('scheduler claims feeding_id before execution and queues one history event', async (t) => {
   const harness = schedulerHarness(t, {
     now: '2026-11-23T08:31:00.000Z',
     schedules: [schedule({ portionGrams: 10 })],
@@ -112,13 +111,15 @@ test('scheduler claims feeding_id before execution and emits one history event',
   const result = await tick;
   assert.equal(result.claimedOccurrences, 1);
   assert.equal(result.executedFeedings, 1);
+  assert.equal(result.queuedEvents, 1);
   const feeding = harness.store.getFeeding(claimed.feedingId);
   assert.equal(feeding?.status, 'completed');
   assert.ok((feeding?.actualGrams ?? 0) >= 10);
 
-  assert.equal(harness.delivery.sawPendingOutbox, true);
-  assert.equal(harness.delivery.events.length, 1);
-  const event = harness.delivery.events[0] as unknown as Record<string, unknown>;
+  const [queued] = harness.store.listPendingOutbox(10, '2099-01-01T00:00:00.000Z', ['scheduled_event']);
+  assert.equal(queued?.aggregateId, claimed.feedingId);
+  assert.equal(queued.payload, feeding?.terminalPayload);
+  const event = scheduledFeedingEventRequestSchema.parse(JSON.parse(queued.payload));
   assert.equal(event.source, 'scheduled');
   assert.equal(event.schedule_id, firstScheduleId);
   assert.equal(event.feeding_id, claimed.feedingId);
@@ -128,11 +129,7 @@ test('scheduler claims feeding_id before execution and emits one history event',
   const secondTick = await harness.scheduler.tick(new AbortController().signal);
   assert.equal(secondTick.duplicateOccurrences, 1);
   assert.equal(secondTick.executedFeedings, 0);
-  assert.equal(harness.delivery.events.length, 1);
-  assert.equal(harness.store.listPendingOutbox(
-    10,
-    utcDateTimeSchema.parse('2099-01-01T00:00:00.000Z'),
-  ).length, 0);
+  assert.deepEqual(harness.store.listPendingOutbox(10, '2099-01-01T00:00:00.000Z'), [queued]);
 });
 
 test('scheduler is single-flight and skips another occurrence after max lateness', async (t) => {
@@ -155,49 +152,11 @@ test('scheduler is single-flight and skips another occurrence after max lateness
   assert.equal(result.dueOccurrences, 2);
   assert.equal(result.executedFeedings, 1);
   assert.equal(result.skippedLateOccurrences, 1);
-  assert.equal(result.deliveredEvents, 1);
+  assert.equal(result.queuedEvents, 1);
   assert.equal(harness.store.listPendingOutbox(
     10,
     utcDateTimeSchema.parse('2099-01-01T00:00:00.000Z'),
-  ).length, 0);
-});
-
-test('retryable scheduled event delivery keeps exact payload in outbox', async (t) => {
-  const harness = schedulerHarness(t, {
-    now: '2026-11-23T08:31:00.000Z',
-    schedules: [schedule({ portionGrams: 10 })],
-    maximumLatenessMs: 300_000,
-    firstDeliveryFailure: new BackendTransportError(3, new Error('offline')),
-  });
-
-  const result = await harness.scheduler.tick(new AbortController().signal);
-
-  assert.equal(result.executedFeedings, 1);
-  assert.equal(result.deliveredEvents, 0);
-  assert.equal(result.queuedEvents, 1);
-  const outbox = harness.store.listPendingOutbox(
-    10,
-    utcDateTimeSchema.parse('2099-01-01T00:00:00.000Z'),
-  );
-  assert.equal(outbox.length, 1);
-  assert.equal(outbox[0]?.attemptCount, 1);
-  assert.deepEqual(JSON.parse(outbox[0]?.payload ?? '{}'), harness.delivery.events[0]);
-});
-
-test('a refused scheduled event stays in the journal while a later event is delivered', async (t) => {
-  const harness = schedulerHarness(t, {
-    now: '2026-11-23T08:31:00.000Z',
-    schedules: [schedule(), schedule({ scheduleId: secondScheduleId })],
-    maximumLatenessMs: 300_000,
-    firstDeliveryFailure: new BackendConflictError('req-conflict', 'CONFLICT'),
-  });
-
-  const result = await harness.scheduler.tick(new AbortController().signal);
-  assert.equal(result.executedFeedings, 2);
-  assert.equal(result.deliveredEvents, 1);
-  assert.equal(result.queuedEvents, 0);
-  assert.equal(harness.delivery.events.length, 2);
-  assert.deepEqual(harness.store.listPendingOutbox(10, '2099-01-01T00:00:00.000Z'), []);
+  ).length, 1);
 });
 
 test('scheduler stops cleanly while waiting for the manual feeding lease', async (t) => {
@@ -215,7 +174,7 @@ test('scheduler stops cleanly while waiting for the manual feeding lease', async
     controller.abort();
     await running;
     assert.equal(harness.store.getFeeding(claimed.feedingId), null);
-    assert.equal(harness.delivery.events.length, 0);
+    assert.deepEqual(harness.store.listPendingOutbox(10, '2099-01-01T00:00:00.000Z'), []);
   } finally {
     controller.abort();
     manualLease.release();
@@ -226,10 +185,6 @@ interface SchedulerHarness {
   readonly store: SqliteLocalStore;
   readonly scheduler: LocalScheduler;
   readonly executionLock: ReturnType<typeof createDigitalTwin>['executionLock'];
-  readonly delivery: {
-    events: ScheduledFeedingEventRequest[];
-    sawPendingOutbox: boolean;
-  };
 }
 
 function schedulerHarness(
@@ -238,7 +193,6 @@ function schedulerHarness(
     now: string;
     schedules: readonly LocalSchedule[];
     maximumLatenessMs: number;
-    firstDeliveryFailure?: Error;
   },
 ): SchedulerHarness {
   const directory = mkdtempSync(join(tmpdir(), 'smart-cat-feeder-scheduler-'));
@@ -282,40 +236,11 @@ function schedulerHarness(
     telemetry,
     maximumExecutionMs: 30_000,
   });
-  const delivery: SchedulerHarness['delivery'] = {
-    events: [],
-    sawPendingOutbox: false,
-  };
-  const backendGateway = {
-    async reportScheduledFeedingEvent(event: ScheduledFeedingEventRequest) {
-      delivery.events.push(event);
-      delivery.sawPendingOutbox = store.listPendingOutbox(
-        10,
-        utcDateTimeSchema.parse('2099-01-01T00:00:00.000Z'),
-      ).some((message) => message.aggregateId === event.feeding_id);
-      if (options.firstDeliveryFailure && delivery.events.length === 1) throw options.firstDeliveryFailure;
-      return {
-        data: {
-          feeding_id: event.feeding_id,
-          device_id: deviceId,
-          schedule_id: event.schedule_id,
-          source: 'scheduled' as const,
-          status: event.status,
-          actual_grams: event.actual_grams,
-          received_at: utcDateTimeSchema.parse(twin.clock.now().toISOString()),
-        },
-        requestId: 'req-scheduled-event',
-      };
-    },
-    close() {},
-  } as BackendGateway;
   return {
     store,
-    delivery,
     executionLock: twin.executionLock,
     scheduler: new LocalScheduler({
       store,
-      backendGateway,
       clock: twin.clock,
       idGenerator: twin.idGenerator,
       feedingOrchestrator: orchestrator,

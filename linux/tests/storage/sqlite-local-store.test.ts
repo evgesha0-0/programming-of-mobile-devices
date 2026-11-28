@@ -314,7 +314,7 @@ test('outbox orders due rows by next attempt and excludes a preserved permanent 
     deliveredAt: null,
     lastError: 'Backend refused the body',
   });
-  assert.deepEqual(reopened.listPendingOutbox(1, now, 'manual_result').map(({ id }) => id), [soonerId]);
+  assert.deepEqual(reopened.listPendingOutbox(1, now, ['manual_result']).map(({ id }) => id), [soonerId]);
   assert.deepEqual(reopened.listPendingOutbox(10, now).map(({ id }) => id), [soonerId, tiedId, laterId]);
   reopened.close();
 });

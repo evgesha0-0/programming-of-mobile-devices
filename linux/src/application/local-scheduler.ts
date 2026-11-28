@@ -1,12 +1,9 @@
 import { utcDateTimeSchema } from '../domain/index.js';
-import { scheduledFeedingEventRequestSchema } from '../contracts/index.js';
 import type { FeedingOrchestrator } from './feeding-orchestrator.js';
 import { resolveDueOccurrences, type ScheduledOccurrence } from './schedule-occurrence-resolver.js';
 import type { JsonLogger } from '../observability/index.js';
-import { BackendContractError, BackendGatewayError, isPermanentOutboxDeliveryError } from '../ports/index.js';
 import type {
   Clock,
-  BackendGateway,
   IdGenerator,
   LocalSchedule,
   LocalStore,
@@ -15,7 +12,6 @@ import type {
 
 export interface LocalSchedulerOptions {
   readonly store: LocalStore;
-  readonly backendGateway: BackendGateway;
   readonly clock: Clock;
   readonly idGenerator: IdGenerator;
   readonly feedingOrchestrator: FeedingOrchestrator;
@@ -32,7 +28,6 @@ export interface SchedulerTickResult {
   readonly duplicateOccurrences: number;
   readonly skippedLateOccurrences: number;
   readonly executedFeedings: number;
-  readonly deliveredEvents: number;
   readonly queuedEvents: number;
 }
 
@@ -71,8 +66,6 @@ export class LocalScheduler {
       let duplicateOccurrences = 0;
       let skippedLateOccurrences = 0;
       let executedFeedings = 0;
-      let deliveredEvents = 0;
-      let queuedEvents = 0;
       for (const occurrence of occurrences) {
         if (signal.aborted) break;
         const currentMs = this.options.clock.now().getTime();
@@ -108,7 +101,7 @@ export class LocalScheduler {
           feedingId,
           scheduledFor: occurrence.scheduledFor,
         });
-        const execution = await this.options.feedingOrchestrator.execute({
+        await this.options.feedingOrchestrator.execute({
           feedingId,
           source: 'scheduled',
           commandId: null,
@@ -117,50 +110,6 @@ export class LocalScheduler {
           createdAt: occurrence.scheduledFor,
         }, signal);
         executedFeedings += 1;
-        if (signal.aborted) {
-          queuedEvents += 1;
-          break;
-        }
-        const event = scheduledFeedingEventRequestSchema.parse(
-          JSON.parse(execution.terminalPayload) as unknown,
-        );
-        try {
-          const response = await this.options.backendGateway.reportScheduledFeedingEvent(event);
-          if (
-            response.data.feeding_id !== feedingId
-            || response.data.schedule_id !== occurrence.scheduleId
-          ) {
-            throw new BackendContractError(response.requestId);
-          }
-          const deliveredAt = utcDateTimeSchema.parse(this.options.clock.now().toISOString());
-          if (!this.options.store.markOutboxDelivered(execution.outboxId, deliveredAt)) {
-            throw new Error('Scheduled event outbox could not be marked delivered');
-          }
-          deliveredEvents += 1;
-        } catch (error) {
-          if (signal.aborted) {
-            queuedEvents += 1;
-            break;
-          }
-          const now = this.options.clock.now();
-          if (isRetryableGatewayError(error)) {
-            const nextAttemptAt = new Date(now.getTime() + this.options.tickIntervalMs).toISOString();
-            if (!this.options.store.rescheduleOutbox(execution.outboxId, nextAttemptAt, 'Scheduled event delivery was not confirmed')) {
-              throw new Error('Scheduled event retry could not be scheduled');
-            }
-            queuedEvents += 1;
-            this.options.logger.warn('scheduled_event_queued_for_retry', {
-              feedingId,
-              scheduleId: occurrence.scheduleId,
-            });
-            continue;
-          }
-          if (!isPermanentOutboxDeliveryError(error)) throw error;
-          if (!this.options.store.markOutboxFailed(execution.outboxId, now.toISOString(), error.message)) {
-            throw new Error('Scheduled event outbox could not be marked failed');
-          }
-          this.options.logger.warn('scheduled_event_delivery_failed', { outboxId: execution.outboxId, lastError: error.message });
-        }
       }
 
       const result = Object.freeze({
@@ -170,8 +119,7 @@ export class LocalScheduler {
         duplicateOccurrences,
         skippedLateOccurrences,
         executedFeedings,
-        deliveredEvents,
-        queuedEvents,
+        queuedEvents: executedFeedings,
       });
       this.options.logger.info('scheduler_tick_completed', result);
       return result;
@@ -220,13 +168,8 @@ function emptyTickResult(): SchedulerTickResult {
     duplicateOccurrences: 0,
     skippedLateOccurrences: 0,
     executedFeedings: 0,
-    deliveredEvents: 0,
     queuedEvents: 0,
   });
-}
-
-function isRetryableGatewayError(error: unknown): boolean {
-  return error instanceof BackendGatewayError && error.disposition === 'retryable';
 }
 
 function assertPositiveSafeInteger(value: number, name: string): void {

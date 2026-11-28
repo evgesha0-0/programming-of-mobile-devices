@@ -1,13 +1,7 @@
-import { ZodError } from 'zod';
-
 import { manualFeedingResultRequestSchema } from '../contracts/index.js';
-import { feedingIdSchema } from '../domain/index.js';
 import type { JsonLogger } from '../observability/index.js';
 import {
-  BackendContractError,
   BackendGatewayError,
-  isPermanentOutboxDeliveryError,
-  type BackendGateway,
   type Clock,
   type LocalStore,
 } from '../ports/index.js';
@@ -17,11 +11,7 @@ import { isManualAckRefusal, type ManualCommandQueue } from './manual-command-qu
 export interface ManualFeedingWorkerOptions {
   readonly queue: ManualCommandQueue;
   readonly feedingOrchestrator: FeedingOrchestrator;
-  readonly store: Pick<LocalStore,
-    'completeFeedingAndEnqueue' | 'listInterruptedManualFeedings' | 'listPendingOutbox'
-    | 'markOutboxDelivered' | 'markOutboxFailed' | 'rescheduleOutbox'
-  >;
-  readonly gateway: Pick<BackendGateway, 'reportManualFeedingResult'>;
+  readonly store: Pick<LocalStore, 'completeFeedingAndEnqueue' | 'listInterruptedManualFeedings'>;
   readonly clock: Clock;
   readonly logger: JsonLogger;
   readonly intervalMs: number;
@@ -37,67 +27,13 @@ export class ManualFeedingWorker {
   }
 
   async tick(signal: AbortSignal): Promise<FeedingExecutionResult | null> {
-    await this.deliverPendingResults(signal);
-    if (signal.aborted) return null;
-
-    let execution: FeedingExecutionResult | null;
     try {
-      execution = await this.options.feedingOrchestrator.executeNextManual(this.options.queue, signal);
+      return await this.options.feedingOrchestrator.executeNextManual(this.options.queue, signal);
     } catch (error) {
       if (signal.aborted) return null;
       if (!isManualAckRefusal(error) && !isRetryableGatewayError(error)) throw error;
       this.options.logger.warn('manual_command_ack_not_confirmed', { error });
       return null;
-    }
-    if (execution !== null) await this.deliverPendingResults(signal);
-    return execution;
-  }
-
-  private async deliverPendingResults(signal: AbortSignal): Promise<void> {
-    if (signal.aborted) return;
-    const pending = this.options.store.listPendingOutbox(32, this.options.clock.now().toISOString(), 'manual_result');
-    for (const message of pending) {
-      if (signal.aborted) return;
-      try {
-        const feedingId = feedingIdSchema.parse(message.aggregateId);
-        const payload = manualFeedingResultRequestSchema.parse(JSON.parse(message.payload) as unknown);
-        const { data, requestId } = await this.options.gateway.reportManualFeedingResult(feedingId, payload);
-        if (
-          data.feeding_id !== feedingId
-          || data.command_id !== payload.command_id
-          || data.status !== payload.status
-          || data.actual_grams !== payload.actual_grams
-          || Date.parse(data.finished_at) !== Date.parse(payload.finished_at)
-        ) {
-          throw new BackendContractError(requestId);
-        }
-        if (!this.options.store.markOutboxDelivered(message.id, this.options.clock.now().toISOString())) {
-          throw new Error('Manual feeding result outbox could not be marked delivered');
-        }
-      } catch (error) {
-        if (signal.aborted) return;
-        const now = this.options.clock.now();
-        if (isRetryableGatewayError(error)) {
-          const nextAttemptAt = new Date(now.getTime() + this.options.intervalMs).toISOString();
-          if (!this.options.store.rescheduleOutbox(message.id, nextAttemptAt, 'Manual result delivery was not confirmed')) {
-            throw new Error('Manual feeding result retry could not be scheduled');
-          }
-          this.options.logger.warn('manual_feeding_result_queued_for_retry', { feedingId: message.aggregateId, nextAttemptAt });
-          continue;
-        }
-        let lastError: string;
-        if (isPermanentOutboxDeliveryError(error)) {
-          lastError = error.message;
-        } else if (error instanceof SyntaxError || error instanceof ZodError) {
-          lastError = 'Stored manual feeding result does not match the device contract';
-        } else {
-          throw error;
-        }
-        if (!this.options.store.markOutboxFailed(message.id, now.toISOString(), lastError)) {
-          throw new Error('Manual feeding result outbox could not be marked failed');
-        }
-        this.options.logger.warn('manual_feeding_result_delivery_failed', { outboxId: message.id, lastError });
-      }
     }
   }
 

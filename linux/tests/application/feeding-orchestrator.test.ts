@@ -194,7 +194,6 @@ test('repeated pending delivery never dispenses again and the result uses the ac
   await pollManualCommand(harness, command);
   const signal = new AbortController().signal;
   let ackCount = 0;
-  let resultCount = 0;
   let ackStartedAt = '';
   const queue = commandQueue(harness, (id, request) => {
     ackCount += 1;
@@ -203,36 +202,22 @@ test('repeated pending delivery never dispenses again and the result uses the ac
     ackStartedAt = request.started_at;
     return acceptAck(id, request);
   });
-  const worker = manualWorker(harness, queue, async (feedingId, payload) => {
-    resultCount += 1;
-    assert.equal(feedingId, command.feedingId);
-    assert.equal(payload.command_id, command.commandId);
-    assert.equal(payload.started_at, ackStartedAt);
-    assert.equal(payload.status, 'completed');
-    const [queued] = harness.store.listPendingOutbox(10, '2099-01-01T00:00:00.000Z');
-    assert.equal(queued?.aggregateId, feedingId);
-    assert.deepEqual(JSON.parse(queued.payload), payload);
-    return {
-      requestId: null,
-      data: {
-        feeding_id: feedingId,
-        command_id: payload.command_id,
-        status: payload.status,
-        actual_grams: payload.actual_grams,
-        finished_at: payload.finished_at,
-      },
-    };
-  });
+  const worker = manualWorker(harness, queue);
 
   assert.equal((await driveUntilSettled(harness, worker.tick(signal)))?.status, 'completed');
+  const [queued] = harness.store.listPendingOutbox(10, '2099-01-01T00:00:00.000Z', ['manual_result']);
+  assert.equal(queued?.aggregateId, command.feedingId);
+  const payload = manualFeedingResultRequestSchema.parse(JSON.parse(queued.payload));
+  assert.equal(payload.command_id, command.commandId);
+  assert.equal(payload.started_at, ackStartedAt);
+  assert.equal(payload.status, 'completed');
   const transitions = harness.twin.gpio.transitions();
   assert.equal(transitions.filter(({ line, value }) => line === 'motor_enable' && value).length, 1);
   await pollManualCommand(harness, command);
   assert.equal(await worker.tick(signal), null);
   assert.deepEqual(harness.twin.gpio.transitions(), transitions);
   assert.equal(ackCount, 1);
-  assert.equal(resultCount, 1);
-  assert.deepEqual(harness.store.listPendingOutbox(10, '2099-01-01T00:00:00.000Z'), []);
+  assert.deepEqual(harness.store.listPendingOutbox(10, '2099-01-01T00:00:00.000Z'), [queued]);
 });
 
 test('startup reconciles the original unconfirmed ack after expiry without starting the motor', async (t) => {
@@ -269,32 +254,28 @@ test('startup finalizes an interrupted attempt as failed without measuring or di
   assert.ok(previous.store.recordManualActuationIntent(command.commandId, startedAt));
   const harness = previous.restart();
 
-  let delivered = 0;
   t.mock.method(harness.twin.weightSensor, 'tare', () => assert.fail('Recovery must not tare the sensor'));
   t.mock.method(harness.twin.weightSensor, 'readGrams', () => assert.fail('Recovery must not read the sensor'));
-  await runManualStartup(harness, commandQueue(harness, unexpectedAck), (feedingId, payload) => {
-    delivered += 1;
-    assert.equal(feedingId, command.feedingId);
-    assert.equal(payload.command_id, command.commandId);
-    assert.equal(payload.status, 'failed');
-    assert.equal(payload.started_at, startedAt);
-    assert.equal(payload.finished_at, startedAt);
-    assert.equal(payload.actual_grams, null);
-    assert.equal(payload.error_code, 'INTERNAL_ERROR');
-    assert.match(payload.error_message, /interrupted by a restart/);
-    const [message] = harness.store.listPendingOutbox(10, initialTime, 'manual_result');
-    assert.equal(message?.payload, JSON.stringify(payload));
-    assert.equal(harness.store.getFeeding(feedingId)?.terminalPayload, message.payload);
-    assert.equal(harness.store.listInterruptedManualFeedings().length, 0);
-    return acceptResult(feedingId, payload);
-  });
-  assert.equal(delivered, 1);
+  await runManualStartup(harness, commandQueue(harness, unexpectedAck));
+  const [message] = harness.store.listPendingOutbox(10, initialTime, ['manual_result']);
+  assert.equal(message?.aggregateId, command.feedingId);
+  const payload = manualFeedingResultRequestSchema.parse(JSON.parse(message.payload));
+  assert.equal(payload.command_id, command.commandId);
+  assert.equal(payload.status, 'failed');
+  assert.equal(payload.started_at, startedAt);
+  assert.equal(payload.finished_at, startedAt);
+  assert.equal(payload.actual_grams, null);
+  assert.equal(payload.error_code, 'INTERNAL_ERROR');
+  assert.match(payload.error_message, /interrupted by a restart/);
+  assert.equal(harness.store.getFeeding(command.feedingId)?.terminalPayload, message.payload);
+  assert.equal(harness.store.listInterruptedManualFeedings().length, 0);
   assert.equal(harness.store.recordManualCommand(command), false);
   assert.equal(harness.store.getFeeding(command.feedingId)?.status, 'failed');
   assert.equal(harness.twin.gpio.transitions().length, 0);
 
   const again = harness.restart();
   await runManualStartup(again, commandQueue(again, unexpectedAck));
+  assert.deepEqual(again.store.listPendingOutbox(10, initialTime, ['manual_result']), [message]);
   assert.equal(again.store.getFeeding(command.feedingId)?.status, 'failed');
   assert.equal(again.twin.gpio.transitions().length, 0);
 });
@@ -317,18 +298,18 @@ test('a restart between successful ack and actuation records at most one physica
   const harness = previous.restart();
   await harness.twin.clock.advanceBy(1_000);
   const queue = commandQueue(harness, unexpectedAck);
-  await runManualStartup(harness, queue, (feedingId, payload) => {
-    assert.equal(feedingId, command.feedingId);
-    assert.equal(payload.status, 'completed');
-    assert.equal(payload.started_at, initialTime);
-    return acceptResult(feedingId, payload);
-  });
+  await runManualStartup(harness, queue);
+  const [queued] = harness.store.listPendingOutbox(10, '2099-01-01T00:00:00.000Z', ['manual_result']);
+  assert.equal(queued?.aggregateId, command.feedingId);
+  const payload = manualFeedingResultRequestSchema.parse(JSON.parse(queued.payload));
+  assert.equal(payload.status, 'completed');
+  assert.equal(payload.started_at, initialTime);
   assert.equal(harness.store.getFeeding(command.feedingId)?.status, 'completed');
   await runManualStartup(harness, queue);
   assert.equal(harness.twin.gpio.transitions().filter(({ line, value }) => line === 'motor_enable' && value).length, 1);
 });
 
-test('startup retries the exact saved result without rerunning a finished feeding', async (t) => {
+test('startup leaves the exact saved result queued without rerunning a finished feeding', async (t) => {
   const previous = createHarness(t, 'normal', 'restart-outbox');
   const command = manualCommand(previous, 8);
   previous.store.recordManualCommand(command);
@@ -337,100 +318,14 @@ test('startup retries the exact saved result without rerunning a finished feedin
     commandQueue(previous), new AbortController().signal,
   ));
   assert.ok(saved);
-  previous.store.enqueueOutbox({
-    kind: 'scheduled_event',
-    aggregateId: 'unrelated-scheduled-feeding',
-    payload: '{}',
-    createdAt: initialTime,
-    nextAttemptAt: initialTime,
-  });
-
-  const payloads: string[] = [];
-  const offline = previous.restart();
-  await offline.twin.clock.advanceTo(previous.twin.clock.now());
-  await runManualStartup(offline, commandQueue(offline, unexpectedAck), async (feedingId, payload) => {
-    assert.equal(feedingId, command.feedingId);
-    payloads.push(JSON.stringify(payload));
-    throw new BackendTransportError(1, new Error('offline'));
-  });
-  const [pending] = offline.store.listPendingOutbox(10, '2099-01-01T00:00:00.000Z', 'manual_result');
-  assert.equal(pending?.id, saved.outboxId);
-  assert.equal(pending.attemptCount, 1);
-  assert.equal(pending.payload, saved.terminalPayload);
-  assert.equal(offline.twin.gpio.transitions().length, 0);
-
-  const restored = offline.restart();
-  const queue = commandQueue(restored, unexpectedAck);
-  await runManualStartup(restored, queue);
-  await restored.twin.clock.advanceTo(pending.nextAttemptAt);
-  await runManualStartup(restored, queue, (feedingId, payload) => {
-    assert.equal(feedingId, command.feedingId);
-    payloads.push(JSON.stringify(payload));
-    return acceptResult(feedingId, payload);
-  });
-  assert.deepEqual(payloads, [saved.terminalPayload, saved.terminalPayload]);
+  const pending = previous.store.getOutboxMessage(saved.outboxId);
+  assert.equal(pending?.payload, saved.terminalPayload);
+  const restored = previous.restart();
+  await restored.twin.clock.advanceTo(previous.twin.clock.now());
+  await runManualStartup(restored, commandQueue(restored, unexpectedAck));
+  assert.deepEqual(restored.store.getOutboxMessage(saved.outboxId), pending);
   assert.equal(restored.store.getFeeding(command.feedingId)?.status, 'completed');
   assert.equal(restored.twin.gpio.transitions().length, 0);
-  assert.deepEqual(restored.store.listPendingOutbox(10, '2099-01-01T00:00:00.000Z').map(({ kind }) => kind), [
-    'scheduled_event',
-  ]);
-});
-
-test('bad manual result rows do not block the remaining deliveries in the batch', async (t) => {
-  const harness = createHarness(t, 'normal', 'outbox-isolation');
-  const payload = JSON.stringify({
-    command_id: commandId,
-    source: 'manual',
-    portion_grams: 8,
-    actual_grams: 8,
-    status: 'completed',
-    started_at: initialTime,
-    finished_at: initialTime,
-    error_code: null,
-    error_message: null,
-  });
-  const invalidPayload = '{ "status": "completed" }';
-  const enqueue = (body = payload) => {
-    const feedingId = harness.twin.idGenerator.generateFeedingId();
-    const id = harness.store.enqueueOutbox({
-      kind: 'manual_result',
-      aggregateId: feedingId,
-      payload: body,
-      createdAt: initialTime,
-      nextAttemptAt: initialTime,
-    });
-    return { feedingId, id };
-  };
-  const invalid = enqueue(invalidPayload);
-  const rejected = enqueue();
-  const offline = enqueue();
-  const healthy = enqueue();
-  const refusal = new BackendConflictError('req-conflict', 'CONFLICT');
-  const sent: string[] = [];
-  const worker = manualWorker(harness, commandQueue(harness, unexpectedAck), (feedingId, result) => {
-    sent.push(feedingId);
-    assert.equal(JSON.stringify(result), payload);
-    if (feedingId === rejected.feedingId) throw refusal;
-    if (feedingId === offline.feedingId) throw new BackendTransportError(1, new Error('offline'));
-    return acceptResult(feedingId, result);
-  });
-
-  assert.equal(await worker.tick(new AbortController().signal), null);
-  assert.deepEqual(sent, [rejected.feedingId, offline.feedingId, healthy.feedingId]);
-  const reopened = harness.restart();
-  const invalidRecord = reopened.store.getOutboxMessage(invalid.id);
-  assert.equal(invalidRecord?.payload, invalidPayload);
-  assert.equal(invalidRecord?.failedAt, initialTime);
-  assert.match(invalidRecord?.lastError ?? '', /device contract/);
-  const rejectedRecord = reopened.store.getOutboxMessage(rejected.id);
-  assert.equal(rejectedRecord?.lastError, refusal.message);
-  assert.equal(rejectedRecord?.failedAt, initialTime);
-  assert.equal(rejectedRecord?.payload, payload);
-  assert.equal(reopened.store.getOutboxMessage(healthy.id)?.deliveredAt, initialTime);
-  assert.deepEqual(reopened.store.listPendingOutbox(10, initialTime), []);
-  assert.deepEqual(reopened.store.listPendingOutbox(10, '2026-11-21T13:00:05.000Z').map(({ id }) => id), [offline.id]);
-  await runManualStartup(reopened, commandQueue(reopened, unexpectedAck));
-  assert.equal(reopened.twin.gpio.transitions().length, 0);
 });
 
 test('motor jam produces MOTOR_ERROR and always performs safe stop', async (t) => {
@@ -615,16 +510,6 @@ const acceptAck: BackendGateway['acknowledgeCommand'] = async (id, request) => (
 
 const unexpectedAck: BackendGateway['acknowledgeCommand'] = async () => assert.fail('Unexpected ack');
 
-const acceptResult: BackendGateway['reportManualFeedingResult'] = async (feedingId, payload) => {
-  const common = { feeding_id: feedingId, command_id: payload.command_id, finished_at: payload.finished_at };
-  return {
-    requestId: null,
-    data: payload.status === 'completed'
-      ? { ...common, status: payload.status, actual_grams: payload.actual_grams }
-      : { ...common, status: payload.status, actual_grams: payload.actual_grams },
-  };
-};
-
 function commandQueue(
   harness: Harness,
   acknowledgeCommand: BackendGateway['acknowledgeCommand'] = acceptAck,
@@ -640,14 +525,12 @@ function commandQueue(
 function manualWorker(
   harness: Harness,
   queue: ManualCommandQueue,
-  reportManualFeedingResult: BackendGateway['reportManualFeedingResult'] = async () => assert.fail('Unexpected result'),
   clock: Clock = harness.twin.clock,
 ): ManualFeedingWorker {
   return new ManualFeedingWorker({
     queue,
     feedingOrchestrator: harness.orchestrator,
     store: harness.store,
-    gateway: { reportManualFeedingResult },
     clock,
     logger: harness.logger,
     intervalMs: 5_000,
@@ -657,10 +540,9 @@ function manualWorker(
 async function runManualStartup(
   harness: Harness,
   queue: ManualCommandQueue,
-  report?: BackendGateway['reportManualFeedingResult'],
 ): Promise<void> {
   const controller = new AbortController();
-  const worker = manualWorker(harness, queue, report, {
+  const worker = manualWorker(harness, queue, {
     now: () => harness.twin.clock.now(),
     async sleep() { controller.abort(); },
   });

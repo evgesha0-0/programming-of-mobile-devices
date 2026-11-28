@@ -11,6 +11,7 @@ import {
   LocalScheduler,
   ManualCommandQueue,
   ManualFeedingWorker,
+  OutboxDeliveryService,
   ScheduleSyncService,
 } from '../application/index.js';
 import { serviceMetadata } from '../app.js';
@@ -59,6 +60,7 @@ export interface RunningRuntime extends RuntimeResource {
   readonly scheduleSyncService: ScheduleSyncService;
   readonly commandPoller: CommandPoller;
   readonly manualFeedingWorker: ManualFeedingWorker;
+  readonly outboxDeliveryService: OutboxDeliveryService;
   readonly digitalTwin: ReturnType<typeof createDigitalTwin>;
   readonly simulatorControlServer: SimulatorControlServer;
   readonly feedingOrchestrator: FeedingOrchestrator;
@@ -99,6 +101,7 @@ export function bootstrapRuntime(options: BootstrapRuntimeOptions = {}): Running
   let scheduleSyncService: ScheduleSyncService;
   let commandPoller: CommandPoller;
   let manualFeedingWorker: ManualFeedingWorker;
+  let outboxDeliveryService: OutboxDeliveryService;
   let digitalTwin: ReturnType<typeof createDigitalTwin>;
   let simulatorControlServer: SimulatorControlServer;
   let feedingOrchestrator: FeedingOrchestrator;
@@ -174,14 +177,22 @@ export function bootstrapRuntime(options: BootstrapRuntimeOptions = {}): Running
       queue: manualCommandQueue,
       feedingOrchestrator,
       store: localStore,
-      gateway: backendGateway,
       clock,
       logger,
       intervalMs: config.intervals.commandPollMs,
     });
+    outboxDeliveryService = new OutboxDeliveryService({
+      deviceId: config.deviceId,
+      store: localStore,
+      gateway: backendGateway,
+      clock,
+      logger,
+      pollIntervalMs: config.scheduler.tickMs,
+      backoffInitialMs: config.backoff.initialMs,
+      backoffMaxMs: config.backoff.maxMs,
+    });
     localScheduler = new LocalScheduler({
       store: localStore,
-      backendGateway,
       clock,
       idGenerator: digitalTwin.idGenerator,
       feedingOrchestrator,
@@ -212,6 +223,7 @@ export function bootstrapRuntime(options: BootstrapRuntimeOptions = {}): Running
     scheduleSyncService,
     commandPoller,
     manualFeedingWorker,
+    outboxDeliveryService,
     digitalTwin,
     simulatorControlServer,
     feedingOrchestrator,

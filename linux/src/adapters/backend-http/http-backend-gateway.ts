@@ -154,7 +154,7 @@ export class HttpBackendGateway implements BackendGateway {
 
   reportManualFeedingResult(
     feedingId: FeedingId,
-    request: ManualFeedingResultRequest,
+    request: ManualFeedingResultRequest | string,
   ): Promise<BackendGatewayResult<ManualFeedingResultResponse>> {
     const validatedFeedingId = feedingIdSchema.parse(feedingId);
     const body = serializeRequest(manualFeedingResultRequestSchema, request);
@@ -163,11 +163,11 @@ export class HttpBackendGateway implements BackendGateway {
       path: deviceApiPaths.feedingResult(this.options.deviceId, validatedFeedingId),
       body,
       responseSchema: manualFeedingResultResponseSchema,
-    });
+    }, typeof request === 'string' ? 1 : this.maxAttempts);
   }
 
   reportScheduledFeedingEvent(
-    request: ScheduledFeedingEventRequest,
+    request: ScheduledFeedingEventRequest | string,
   ): Promise<BackendGatewayResult<ScheduledFeedingEventResponse>> {
     const body = serializeRequest(scheduledFeedingEventRequestSchema, request);
     return this.execute({
@@ -175,18 +175,18 @@ export class HttpBackendGateway implements BackendGateway {
       path: deviceApiPaths.feedingEvents(this.options.deviceId),
       body,
       responseSchema: scheduledFeedingEventResponseSchema,
-    });
+    }, typeof request === 'string' ? 1 : this.maxAttempts);
   }
 
   close(): void {
     if (!this.lifecycle.signal.aborted) this.lifecycle.abort();
   }
 
-  private async execute<T>(plan: RequestPlan<T>): Promise<BackendGatewayResult<T>> {
+  private async execute<T>(plan: RequestPlan<T>, maxAttempts = this.maxAttempts): Promise<BackendGatewayResult<T>> {
     this.assertOpen();
     let lastTransportCause: unknown;
 
-    for (let attempt = 1; attempt <= this.maxAttempts; attempt += 1) {
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       this.logger.debug('backend_request_attempt', {
         method: plan.method,
         path: plan.path,
@@ -201,7 +201,7 @@ export class HttpBackendGateway implements BackendGateway {
         if (error instanceof BackendContractError) throw error;
         if (this.lifecycle.signal.aborted) throw new BackendGatewayClosedError();
         lastTransportCause = error;
-        if (attempt === this.maxAttempts) {
+        if (attempt === maxAttempts) {
           throw new BackendTransportError(attempt, lastTransportCause);
         }
         await this.waitBeforeRetry(plan, attempt, null, null);
@@ -231,7 +231,7 @@ export class HttpBackendGateway implements BackendGateway {
       }
 
       const retryable = isRetryableStatus(response.status);
-      if (!retryable || attempt === this.maxAttempts) {
+      if (!retryable || attempt === maxAttempts) {
         throw new BackendHttpError({
           statusCode: response.status,
           requestId: errorPayload.requestId,
@@ -248,7 +248,7 @@ export class HttpBackendGateway implements BackendGateway {
       );
     }
 
-    throw new BackendTransportError(this.maxAttempts, lastTransportCause);
+    throw new BackendTransportError(maxAttempts, lastTransportCause);
   }
 
   private async fetchAttempt<T>(plan: RequestPlan<T>): Promise<{
@@ -279,7 +279,14 @@ export class HttpBackendGateway implements BackendGateway {
         new URL(plan.path, this.backendUrl),
         requestInit,
       );
-      const responseText = await readResponseText(response);
+      let responseText = '';
+      try {
+        responseText = await readResponseText(response);
+      } catch (error) {
+        if (response.ok || this.lifecycle.signal.aborted) throw error;
+        // Unreadable diagnostics must not alter the HTTP error classification.
+        controller.abort();
+      }
       return { response, responseText };
     } finally {
       clearTimeout(timeout);
@@ -318,7 +325,11 @@ export class HttpBackendGateway implements BackendGateway {
   }
 }
 
-function serializeRequest<T>(schema: z.ZodType<T>, request: T): string {
+function serializeRequest<T>(schema: z.ZodType<T>, request: T | string): string {
+  if (typeof request === 'string') {
+    schema.parse(JSON.parse(request) as unknown);
+    return request;
+  }
   return JSON.stringify(schema.parse(request));
 }
 

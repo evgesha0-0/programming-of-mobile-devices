@@ -15,14 +15,16 @@ export async function runRuntime(options: BootstrapRuntimeOptions = {}): Promise
   const scheduleSync = runtime.scheduleSyncService.run(controller.signal);
   const commandPoll = runtime.commandPoller.run(controller.signal);
   const manualFeeding = runtime.manualFeedingWorker.run(controller.signal);
+  const outboxDelivery = runtime.outboxDeliveryService.run(controller.signal);
   const scheduler = runtime.localScheduler.run(controller.signal);
-  const services = [reporter, scheduleSync, commandPoll, manualFeeding, scheduler] as const;
+  const services = [reporter, scheduleSync, commandPoll, manualFeeding, outboxDelivery, scheduler] as const;
   try {
     const outcome = await Promise.race([
       reporter.then(() => ({ kind: 'reporter' as const })),
       scheduleSync.then(() => ({ kind: 'schedule_sync' as const })),
       commandPoll.then(() => ({ kind: 'command_poll' as const })),
       manualFeeding.then(() => ({ kind: 'manual_feeding' as const })),
+      outboxDelivery.then(() => ({ kind: 'outbox_delivery' as const })),
       scheduler.then(() => ({ kind: 'scheduler' as const })),
       shutdown.promise.then((signal) => ({ kind: 'signal' as const, signal })),
     ]);

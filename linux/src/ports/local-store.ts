@@ -166,7 +166,7 @@ export interface LocalStore {
   claimScheduleOccurrence(claim: ScheduleOccurrenceClaim): boolean;
   enqueueOutbox(message: NewOutboxMessage): number;
   getOutboxMessage(id: number): OutboxMessage | null;
-  listPendingOutbox(limit: number, availableAt: UtcDateTime, kind?: OutboxKind): OutboxMessage[];
+  listPendingOutbox(limit: number, availableAt: UtcDateTime, kinds?: readonly OutboxKind[]): OutboxMessage[];
   rescheduleOutbox(id: number, nextAttemptAt: UtcDateTime, lastError: string): boolean;
   markOutboxDelivered(id: number, deliveredAt: UtcDateTime): boolean;
   markOutboxFailed(id: number, failedAt: UtcDateTime, lastError: string): boolean;

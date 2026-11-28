@@ -704,12 +704,14 @@ export class SqliteLocalStore implements LocalStore {
     return row ? readOutboxMessage(row) : null;
   }
 
-  listPendingOutbox(limit: number, availableAt: UtcDateTime, kind?: OutboxKind): OutboxMessage[] {
+  listPendingOutbox(limit: number, availableAt: UtcDateTime, kinds?: readonly OutboxKind[]): OutboxMessage[] {
     this.assertOpen();
     if (!Number.isSafeInteger(limit) || limit < 1) {
       throw new RangeError('limit must be a positive safe integer');
     }
     const parsedAvailableAt = utcDateTimeSchema.parse(availableAt);
+    if (kinds?.length === 0) return [];
+    const kindFilter = kinds ? `AND kind IN (${kinds.map(() => '?').join(', ')})` : '';
     const rows = this.database.prepare(`
       SELECT
         id,
@@ -725,10 +727,10 @@ export class SqliteLocalStore implements LocalStore {
       FROM outbox
       WHERE delivered_at IS NULL AND failed_at IS NULL
         AND julianday(next_attempt_at) <= julianday(?)
-        AND (? IS NULL OR kind = ?)
+        ${kindFilter}
       ORDER BY julianday(next_attempt_at), id
       LIMIT ?
-    `).all(parsedAvailableAt, kind ?? null, kind ?? null, limit);
+    `).all(parsedAvailableAt, ...(kinds ?? []), limit);
     return rows.map(readOutboxMessage);
   }
 
