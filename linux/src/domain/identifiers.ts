@@ -2,7 +2,7 @@ import { z } from 'zod';
 
 const uuidSchema = z.string().uuid();
 
-export const deviceIdSchema = uuidSchema.brand<'DeviceId'>();
+export const deviceIdSchema = uuidSchema.toLowerCase().brand<'DeviceId'>();
 export const scheduleIdSchema = uuidSchema.brand<'ScheduleId'>();
 export const commandIdSchema = uuidSchema.brand<'CommandId'>();
 export const feedingIdSchema = uuidSchema.brand<'FeedingId'>();

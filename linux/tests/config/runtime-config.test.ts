@@ -32,6 +32,11 @@ test('runtime config validates and freezes direct environment settings', () => {
   assert.equal(JSON.stringify(runtimeConfigSummary(config)).includes(deviceToken), false);
 });
 
+test('DEVICE_ID is normalized to the lowercase UUID used by backend credentials', () => {
+  const config = loadRuntimeConfig({ ...validEnvironment(), DEVICE_ID: deviceId.toUpperCase() });
+  assert.equal(config.deviceId, deviceId);
+});
+
 test('runtime config reads a custom command poll interval', () => {
   const config = loadRuntimeConfig({ ...validEnvironment(), COMMAND_POLL_INTERVAL_MS: '2500' });
   assert.equal(config.intervals.commandPollMs, 2_500);
