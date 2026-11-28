@@ -25,7 +25,7 @@ import type {
   LocalSchedule,
   LocalScheduleSnapshot,
 } from '../../src/ports/index.js';
-import { BackendTransportError } from '../../src/ports/index.js';
+import { BackendConflictError, BackendTransportError } from '../../src/ports/index.js';
 import { createDigitalTwin } from '../../src/simulator/index.js';
 
 const deviceId = deviceIdSchema.parse('d6d174f4-e79f-49d1-9476-78bc99483752');
@@ -167,7 +167,7 @@ test('retryable scheduled event delivery keeps exact payload in outbox', async (
     now: '2026-11-23T08:31:00.000Z',
     schedules: [schedule({ portionGrams: 10 })],
     maximumLatenessMs: 300_000,
-    deliveryFailure: new BackendTransportError(3, new Error('offline')),
+    firstDeliveryFailure: new BackendTransportError(3, new Error('offline')),
   });
 
   const result = await harness.scheduler.tick(new AbortController().signal);
@@ -180,7 +180,24 @@ test('retryable scheduled event delivery keeps exact payload in outbox', async (
     utcDateTimeSchema.parse('2099-01-01T00:00:00.000Z'),
   );
   assert.equal(outbox.length, 1);
+  assert.equal(outbox[0]?.attemptCount, 1);
   assert.deepEqual(JSON.parse(outbox[0]?.payload ?? '{}'), harness.delivery.events[0]);
+});
+
+test('a refused scheduled event stays in the journal while a later event is delivered', async (t) => {
+  const harness = schedulerHarness(t, {
+    now: '2026-11-23T08:31:00.000Z',
+    schedules: [schedule(), schedule({ scheduleId: secondScheduleId })],
+    maximumLatenessMs: 300_000,
+    firstDeliveryFailure: new BackendConflictError('req-conflict', 'CONFLICT'),
+  });
+
+  const result = await harness.scheduler.tick(new AbortController().signal);
+  assert.equal(result.executedFeedings, 2);
+  assert.equal(result.deliveredEvents, 1);
+  assert.equal(result.queuedEvents, 0);
+  assert.equal(harness.delivery.events.length, 2);
+  assert.deepEqual(harness.store.listPendingOutbox(10, '2099-01-01T00:00:00.000Z'), []);
 });
 
 test('scheduler stops cleanly while waiting for the manual feeding lease', async (t) => {
@@ -221,7 +238,7 @@ function schedulerHarness(
     now: string;
     schedules: readonly LocalSchedule[];
     maximumLatenessMs: number;
-    deliveryFailure?: Error;
+    firstDeliveryFailure?: Error;
   },
 ): SchedulerHarness {
   const directory = mkdtempSync(join(tmpdir(), 'smart-cat-feeder-scheduler-'));
@@ -276,7 +293,7 @@ function schedulerHarness(
         10,
         utcDateTimeSchema.parse('2099-01-01T00:00:00.000Z'),
       ).some((message) => message.aggregateId === event.feeding_id);
-      if (options.deliveryFailure) throw options.deliveryFailure;
+      if (options.firstDeliveryFailure && delivery.events.length === 1) throw options.firstDeliveryFailure;
       return {
         data: {
           feeding_id: event.feeding_id,

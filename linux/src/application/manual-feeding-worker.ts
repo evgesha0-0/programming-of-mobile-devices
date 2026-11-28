@@ -1,9 +1,12 @@
+import { ZodError } from 'zod';
+
 import { manualFeedingResultRequestSchema } from '../contracts/index.js';
 import { feedingIdSchema } from '../domain/index.js';
 import type { JsonLogger } from '../observability/index.js';
 import {
   BackendContractError,
   BackendGatewayError,
+  isPermanentOutboxDeliveryError,
   type BackendGateway,
   type Clock,
   type LocalStore,
@@ -16,7 +19,7 @@ export interface ManualFeedingWorkerOptions {
   readonly feedingOrchestrator: FeedingOrchestrator;
   readonly store: Pick<LocalStore,
     'completeFeedingAndEnqueue' | 'listInterruptedManualFeedings' | 'listPendingOutbox'
-    | 'markOutboxDelivered' | 'rescheduleOutbox'
+    | 'markOutboxDelivered' | 'markOutboxFailed' | 'rescheduleOutbox'
   >;
   readonly gateway: Pick<BackendGateway, 'reportManualFeedingResult'>;
   readonly clock: Clock;
@@ -55,9 +58,9 @@ export class ManualFeedingWorker {
     const pending = this.options.store.listPendingOutbox(32, this.options.clock.now().toISOString(), 'manual_result');
     for (const message of pending) {
       if (signal.aborted) return;
-      const feedingId = feedingIdSchema.parse(message.aggregateId);
-      const payload = manualFeedingResultRequestSchema.parse(JSON.parse(message.payload) as unknown);
       try {
+        const feedingId = feedingIdSchema.parse(message.aggregateId);
+        const payload = manualFeedingResultRequestSchema.parse(JSON.parse(message.payload) as unknown);
         const { data, requestId } = await this.options.gateway.reportManualFeedingResult(feedingId, payload);
         if (
           data.feeding_id !== feedingId
@@ -73,12 +76,27 @@ export class ManualFeedingWorker {
         }
       } catch (error) {
         if (signal.aborted) return;
-        if (!isRetryableGatewayError(error)) throw error;
-        const nextAttemptAt = new Date(this.options.clock.now().getTime() + this.options.intervalMs).toISOString();
-        if (!this.options.store.rescheduleOutbox(message.id, nextAttemptAt, 'Manual result delivery was not confirmed')) {
-          throw new Error('Manual feeding result retry could not be scheduled');
+        const now = this.options.clock.now();
+        if (isRetryableGatewayError(error)) {
+          const nextAttemptAt = new Date(now.getTime() + this.options.intervalMs).toISOString();
+          if (!this.options.store.rescheduleOutbox(message.id, nextAttemptAt, 'Manual result delivery was not confirmed')) {
+            throw new Error('Manual feeding result retry could not be scheduled');
+          }
+          this.options.logger.warn('manual_feeding_result_queued_for_retry', { feedingId: message.aggregateId, nextAttemptAt });
+          continue;
         }
-        this.options.logger.warn('manual_feeding_result_queued_for_retry', { feedingId, nextAttemptAt });
+        let lastError: string;
+        if (isPermanentOutboxDeliveryError(error)) {
+          lastError = error.message;
+        } else if (error instanceof SyntaxError || error instanceof ZodError) {
+          lastError = 'Stored manual feeding result does not match the device contract';
+        } else {
+          throw error;
+        }
+        if (!this.options.store.markOutboxFailed(message.id, now.toISOString(), lastError)) {
+          throw new Error('Manual feeding result outbox could not be marked failed');
+        }
+        this.options.logger.warn('manual_feeding_result_delivery_failed', { outboxId: message.id, lastError });
       }
     }
   }

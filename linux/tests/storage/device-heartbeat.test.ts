@@ -16,7 +16,7 @@ test('heartbeat payload and delivery metadata survive SQLite restart', (t) => {
   const payload = heartbeat('online', '2026-11-21T06:00:00.000Z');
   const store = SqliteLocalStore.open({ databasePath });
 
-  assert.equal(store.getSchemaVersion(), 3);
+  assert.equal(store.getSchemaVersion(), 4);
   assert.equal(store.getLastHeartbeat(), null);
   store.savePendingHeartbeat(payload);
   assert.deepEqual(store.getLastHeartbeat(), {

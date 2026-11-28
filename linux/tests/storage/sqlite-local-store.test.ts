@@ -45,7 +45,7 @@ test('SQLite store applies migrations and enforces a single process lock', (t) =
   const databasePath = temporaryDatabasePath(t);
   const store = SqliteLocalStore.open({ databasePath });
 
-  assert.equal(store.getSchemaVersion(), 3);
+  assert.equal(store.getSchemaVersion(), 4);
   assert.throws(
     () => SqliteLocalStore.open({ databasePath }),
     LocalStoreLockedError,
@@ -53,7 +53,7 @@ test('SQLite store applies migrations and enforces a single process lock', (t) =
 
   store.close();
   const reopened = SqliteLocalStore.open({ databasePath });
-  assert.equal(reopened.getSchemaVersion(), 3);
+  assert.equal(reopened.getSchemaVersion(), 4);
   reopened.close();
 });
 
@@ -95,7 +95,7 @@ test('manual command survives a schema upgrade and exact replays do not insert a
   store.close();
 
   const reopened = SqliteLocalStore.open({ databasePath });
-  assert.equal(reopened.getSchemaVersion(), 3);
+  assert.equal(reopened.getSchemaVersion(), 4);
   assert.deepEqual(reopened.getManualCommand(manualCommand.commandId), manualCommand);
   assert.equal(reopened.recordManualCommand(manualCommand), false);
   assert.equal(reopened.getNextPendingManualAck(), null);
@@ -194,18 +194,28 @@ test('schedule occurrence claim is durable and rejects conflicting identities', 
   reopened.close();
 });
 
-test('outbox preserves exact payload and durable retry state', (t) => {
-  const databasePath = temporaryDatabasePath(t);
-  const store = SqliteLocalStore.open({ databasePath });
+test('outbox preserves exact payload and retry state across schema upgrade and restart', (t) => {
+  const directory = temporaryDirectory(t);
+  const databasePath = join(directory, 'device.sqlite');
+  const migrationsDirectory = join(directory, 'legacy-migrations');
+  mkdirSync(migrationsDirectory);
+  for (const migration of ['001_initial.sql', '002_device_heartbeat.sql', '003_manual_command_ack.sql']) {
+    copyFileSync(join(dirname(initialMigrationPath), migration), join(migrationsDirectory, migration));
+  }
+  let store = SqliteLocalStore.open({ databasePath, migrationsDirectory });
+  assert.equal(store.getSchemaVersion(), 3);
   const message = {
     kind: 'scheduled_event' as const,
     aggregateId: firstFeedingId,
-    payload: '{"feeding_id":"b01f6503-fad1-4d5d-b734-864159d9b1e6","status":"completed"}',
+    payload: '{ "status": "completed",  "feeding_id": "b01f6503-fad1-4d5d-b734-864159d9b1e6" }',
     createdAt: utcDateTimeSchema.parse('2026-10-29T08:30:08Z'),
     nextAttemptAt: utcDateTimeSchema.parse('2026-10-29T08:30:08Z'),
   };
 
   const id = store.enqueueOutbox(message);
+  store.close();
+  store = SqliteLocalStore.open({ databasePath });
+  assert.equal(store.getSchemaVersion(), 4);
   assert.equal(store.enqueueOutbox(message), id);
   assert.throws(
     () => store.enqueueOutbox({ ...message, payload: '{"status":"failed"}' }),
@@ -229,6 +239,8 @@ test('outbox preserves exact payload and durable retry state', (t) => {
     utcDateTimeSchema.parse('2026-10-29T08:31:00Z'),
     'Backend unavailable',
   ), true);
+  store.close();
+  store = SqliteLocalStore.open({ databasePath });
   assert.deepEqual(
     store.listPendingOutbox(10, utcDateTimeSchema.parse('2026-10-29T08:30:59Z')),
     [],
@@ -239,6 +251,7 @@ test('outbox preserves exact payload and durable retry state', (t) => {
   );
   assert.equal(retried[0]?.attemptCount, 1);
   assert.equal(retried[0]?.lastError, 'Backend unavailable');
+  assert.equal(retried[0]?.payload, message.payload);
 
   assert.equal(store.markOutboxDelivered(
     id,
@@ -248,11 +261,62 @@ test('outbox preserves exact payload and durable retry state', (t) => {
     id,
     utcDateTimeSchema.parse('2026-10-29T08:31:02Z'),
   ), false);
+  assert.equal(store.markOutboxFailed(id, '2026-10-29T08:31:02Z', 'Conflict'), false);
+  assert.equal(store.rescheduleOutbox(id, '2026-10-29T08:32:00Z', 'Offline'), false);
+  assert.deepEqual(store.getOutboxMessage(id), {
+    ...message,
+    id,
+    attemptCount: 1,
+    nextAttemptAt: '2026-10-29T08:31:00Z',
+    deliveredAt: '2026-10-29T08:31:01Z',
+    failedAt: null,
+    lastError: null,
+  });
   assert.deepEqual(
     store.listPendingOutbox(10, utcDateTimeSchema.parse('2026-10-29T09:00:00Z')),
     [],
   );
   store.close();
+});
+
+test('outbox orders due rows by next attempt and excludes a preserved permanent failure', (t) => {
+  const databasePath = temporaryDatabasePath(t);
+  const store = SqliteLocalStore.open({ databasePath });
+  const problem = {
+    kind: 'manual_result' as const,
+    aggregateId: 'rejected',
+    payload: '{ "status": "completed" }',
+    createdAt: '2026-10-29T08:30:00Z',
+    nextAttemptAt: '2026-10-29T08:31:00Z',
+  };
+  const now = '2026-10-29T08:31:00.100Z';
+  const failedId = store.enqueueOutbox(problem);
+  const laterId = store.enqueueOutbox({ ...problem, aggregateId: 'later', nextAttemptAt: now });
+  const sooner = { ...problem, nextAttemptAt: '2026-10-29T08:31:00.050Z' };
+  const soonerId = store.enqueueOutbox({ ...sooner, aggregateId: 'sooner' });
+  const tiedId = store.enqueueOutbox({ ...sooner, aggregateId: 'tied' });
+  store.enqueueOutbox({ ...problem, aggregateId: 'future', nextAttemptAt: '2026-10-29T08:31:00.101Z' });
+  assert.deepEqual(store.listPendingOutbox(10, now).map(({ id }) => id), [failedId, soonerId, tiedId, laterId]);
+
+  assert.equal(store.markOutboxFailed(failedId, now, 'Backend refused the body'), true);
+  assert.equal(store.markOutboxDelivered(failedId, now), false);
+  assert.equal(store.rescheduleOutbox(failedId, now, 'Try again'), false);
+  assert.equal(store.markOutboxFailed(failedId, now, 'Other error'), false);
+  store.close();
+
+  const reopened = SqliteLocalStore.open({ databasePath });
+  assert.equal(reopened.enqueueOutbox(problem), failedId);
+  assert.deepEqual(reopened.getOutboxMessage(failedId), {
+    ...problem,
+    id: failedId,
+    attemptCount: 1,
+    failedAt: now,
+    deliveredAt: null,
+    lastError: 'Backend refused the body',
+  });
+  assert.deepEqual(reopened.listPendingOutbox(1, now, 'manual_result').map(({ id }) => id), [soonerId]);
+  assert.deepEqual(reopened.listPendingOutbox(10, now).map(({ id }) => id), [soonerId, tiedId, laterId]);
+  reopened.close();
 });
 
 function temporaryDatabasePath(t: TestContext): string {

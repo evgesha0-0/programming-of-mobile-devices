@@ -376,6 +376,63 @@ test('startup retries the exact saved result without rerunning a finished feedin
   ]);
 });
 
+test('bad manual result rows do not block the remaining deliveries in the batch', async (t) => {
+  const harness = createHarness(t, 'normal', 'outbox-isolation');
+  const payload = JSON.stringify({
+    command_id: commandId,
+    source: 'manual',
+    portion_grams: 8,
+    actual_grams: 8,
+    status: 'completed',
+    started_at: initialTime,
+    finished_at: initialTime,
+    error_code: null,
+    error_message: null,
+  });
+  const invalidPayload = '{ "status": "completed" }';
+  const enqueue = (body = payload) => {
+    const feedingId = harness.twin.idGenerator.generateFeedingId();
+    const id = harness.store.enqueueOutbox({
+      kind: 'manual_result',
+      aggregateId: feedingId,
+      payload: body,
+      createdAt: initialTime,
+      nextAttemptAt: initialTime,
+    });
+    return { feedingId, id };
+  };
+  const invalid = enqueue(invalidPayload);
+  const rejected = enqueue();
+  const offline = enqueue();
+  const healthy = enqueue();
+  const refusal = new BackendConflictError('req-conflict', 'CONFLICT');
+  const sent: string[] = [];
+  const worker = manualWorker(harness, commandQueue(harness, unexpectedAck), (feedingId, result) => {
+    sent.push(feedingId);
+    assert.equal(JSON.stringify(result), payload);
+    if (feedingId === rejected.feedingId) throw refusal;
+    if (feedingId === offline.feedingId) throw new BackendTransportError(1, new Error('offline'));
+    return acceptResult(feedingId, result);
+  });
+
+  assert.equal(await worker.tick(new AbortController().signal), null);
+  assert.deepEqual(sent, [rejected.feedingId, offline.feedingId, healthy.feedingId]);
+  const reopened = harness.restart();
+  const invalidRecord = reopened.store.getOutboxMessage(invalid.id);
+  assert.equal(invalidRecord?.payload, invalidPayload);
+  assert.equal(invalidRecord?.failedAt, initialTime);
+  assert.match(invalidRecord?.lastError ?? '', /device contract/);
+  const rejectedRecord = reopened.store.getOutboxMessage(rejected.id);
+  assert.equal(rejectedRecord?.lastError, refusal.message);
+  assert.equal(rejectedRecord?.failedAt, initialTime);
+  assert.equal(rejectedRecord?.payload, payload);
+  assert.equal(reopened.store.getOutboxMessage(healthy.id)?.deliveredAt, initialTime);
+  assert.deepEqual(reopened.store.listPendingOutbox(10, initialTime), []);
+  assert.deepEqual(reopened.store.listPendingOutbox(10, '2026-11-21T13:00:05.000Z').map(({ id }) => id), [offline.id]);
+  await runManualStartup(reopened, commandQueue(reopened, unexpectedAck));
+  assert.equal(reopened.twin.gpio.transitions().length, 0);
+});
+
 test('motor jam produces MOTOR_ERROR and always performs safe stop', async (t) => {
   const harness = createHarness(t, 'motor-jam', 'jam-feeding');
   const intent = scheduledIntent(harness, 20);

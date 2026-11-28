@@ -154,3 +154,15 @@ export class BackendGatewayClosedError extends BackendGatewayError {
     this.name = 'BackendGatewayClosedError';
   }
 }
+
+export function isPermanentOutboxDeliveryError(error: unknown): error is BackendGatewayError {
+  return error instanceof BackendContractError || (
+    error instanceof BackendGatewayError && (
+      error.disposition === 'quarantine' || (
+        error.disposition === 'fatal' && error.statusCode !== null
+        && error.statusCode >= 400 && error.statusCode < 500
+        && error.statusCode !== 401 && error.statusCode !== 403
+      )
+    )
+  );
+}

@@ -697,6 +697,13 @@ export class SqliteLocalStore implements LocalStore {
     return this.transaction(() => this.enqueueOutboxWithinTransaction(message));
   }
 
+  getOutboxMessage(id: number): OutboxMessage | null {
+    this.assertOpen();
+    assertPositiveSafeInteger(id, 'id');
+    const row = this.database.prepare('SELECT * FROM outbox WHERE id = ?').get(id);
+    return row ? readOutboxMessage(row) : null;
+  }
+
   listPendingOutbox(limit: number, availableAt: UtcDateTime, kind?: OutboxKind): OutboxMessage[] {
     this.assertOpen();
     if (!Number.isSafeInteger(limit) || limit < 1) {
@@ -712,12 +719,14 @@ export class SqliteLocalStore implements LocalStore {
         attempt_count,
         next_attempt_at,
         last_error,
-        created_at
+        created_at,
+        delivered_at,
+        failed_at
       FROM outbox
-      WHERE delivered_at IS NULL
+      WHERE delivered_at IS NULL AND failed_at IS NULL
         AND julianday(next_attempt_at) <= julianday(?)
         AND (? IS NULL OR kind = ?)
-      ORDER BY julianday(created_at), id
+      ORDER BY julianday(next_attempt_at), id
       LIMIT ?
     `).all(parsedAvailableAt, kind ?? null, kind ?? null, limit);
     return rows.map(readOutboxMessage);
@@ -734,7 +743,7 @@ export class SqliteLocalStore implements LocalStore {
       SET attempt_count = attempt_count + 1,
           next_attempt_at = ?,
           last_error = ?
-      WHERE id = ? AND delivered_at IS NULL
+      WHERE id = ? AND delivered_at IS NULL AND failed_at IS NULL
     `).run(parsedNextAttemptAt, lastError, id);
     return sqliteIntegerToNumber(result.changes, 'changed row count') === 1;
   }
@@ -746,8 +755,22 @@ export class SqliteLocalStore implements LocalStore {
     const result = this.database.prepare(`
       UPDATE outbox
       SET delivered_at = ?, last_error = NULL
-      WHERE id = ? AND delivered_at IS NULL
+      WHERE id = ? AND delivered_at IS NULL AND failed_at IS NULL
     `).run(parsedDeliveredAt, id);
+    return sqliteIntegerToNumber(result.changes, 'changed row count') === 1;
+  }
+
+  markOutboxFailed(id: number, failedAt: UtcDateTime, lastError: string): boolean {
+    this.assertOpen();
+    assertPositiveSafeInteger(id, 'id');
+    const parsedFailedAt = utcDateTimeSchema.parse(failedAt);
+    if (lastError.trim().length === 0) throw new TypeError('lastError must not be blank');
+
+    const result = this.database.prepare(`
+      UPDATE outbox
+      SET attempt_count = attempt_count + 1, failed_at = ?, last_error = ?
+      WHERE id = ? AND delivered_at IS NULL AND failed_at IS NULL
+    `).run(parsedFailedAt, lastError, id);
     return sqliteIntegerToNumber(result.changes, 'changed row count') === 1;
   }
 
@@ -1078,6 +1101,8 @@ function readOutboxMessage(row: Record<string, unknown>): OutboxMessage {
     nextAttemptAt: utcDateTimeSchema.parse(readString(row, 'next_attempt_at')),
     lastError: readNullableString(row, 'last_error'),
     createdAt: utcDateTimeSchema.parse(readString(row, 'created_at')),
+    deliveredAt: utcDateTimeSchema.nullable().parse(row.delivered_at),
+    failedAt: utcDateTimeSchema.nullable().parse(row.failed_at),
   };
 }
 

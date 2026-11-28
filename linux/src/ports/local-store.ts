@@ -46,6 +46,8 @@ export interface OutboxMessage extends NewOutboxMessage {
   id: number;
   attemptCount: number;
   lastError: string | null;
+  deliveredAt: UtcDateTime | null;
+  failedAt: UtcDateTime | null;
 }
 
 export type HeartbeatDeliveryState = 'pending' | 'delivered';
@@ -163,9 +165,11 @@ export interface LocalStore {
   getScheduleOccurrence(occurrenceKey: string): ScheduleOccurrenceClaim | null;
   claimScheduleOccurrence(claim: ScheduleOccurrenceClaim): boolean;
   enqueueOutbox(message: NewOutboxMessage): number;
+  getOutboxMessage(id: number): OutboxMessage | null;
   listPendingOutbox(limit: number, availableAt: UtcDateTime, kind?: OutboxKind): OutboxMessage[];
   rescheduleOutbox(id: number, nextAttemptAt: UtcDateTime, lastError: string): boolean;
   markOutboxDelivered(id: number, deliveredAt: UtcDateTime): boolean;
+  markOutboxFailed(id: number, failedAt: UtcDateTime, lastError: string): boolean;
 }
 
 export class ManualCommandConflictError extends Error {
