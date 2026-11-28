@@ -11,7 +11,7 @@ import type {
 } from '../ports/index.js';
 
 export interface LocalSchedulerOptions {
-  readonly store: LocalStore;
+  readonly store: Pick<LocalStore, 'getScheduleSnapshot' | 'getScheduleOccurrence' | 'claimScheduleOccurrence'>;
   readonly clock: Clock;
   readonly idGenerator: IdGenerator;
   readonly feedingOrchestrator: FeedingOrchestrator;

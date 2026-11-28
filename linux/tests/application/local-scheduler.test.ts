@@ -4,10 +4,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 
+import { HttpBackendGateway } from '../../src/adapters/backend-http/index.js';
 import {
   DeviceStateReporter,
   FeedingOrchestrator,
   LocalScheduler,
+  OutboxDeliveryService,
   SchedulerSingleFlightError,
   resolveDueOccurrences,
 } from '../../src/application/index.js';
@@ -18,7 +20,7 @@ import {
   scheduleIdSchema,
   utcDateTimeSchema,
 } from '../../src/domain/index.js';
-import { scheduledFeedingEventRequestSchema } from '../../src/contracts/index.js';
+import { deviceApiPaths, scheduledFeedingEventRequestSchema } from '../../src/contracts/index.js';
 import { createJsonLogger, LoggerTelemetry } from '../../src/observability/index.js';
 import type {
   BackendGateway,
@@ -132,6 +134,85 @@ test('scheduler claims feeding_id before execution and queues one history event'
   assert.deepEqual(harness.store.listPendingOutbox(10, '2099-01-01T00:00:00.000Z'), [queued]);
 });
 
+test('scheduled feeding completes offline and its saved event is delivered after reconnection', async (t) => {
+  const { store, scheduler, clock } = schedulerHarness(t, {
+    now: '2026-11-23T08:31:00.000Z',
+    schedules: [schedule()],
+    maximumLatenessMs: 300_000,
+  });
+  const signal = new AbortController().signal;
+  const requests: Array<{ path: string; body: string }> = [];
+  let online = false;
+  const gateway = new HttpBackendGateway({
+    backendUrl: 'https://backend.example.test',
+    deviceId,
+    deviceToken: `dvc_${'A'.repeat(43)}`,
+    requestTimeoutMs: 1_000,
+    backoffInitialMs: 100,
+    backoffMaxMs: 100,
+    async fetchImplementation(input, init) {
+      assert.equal(init?.method, 'POST');
+      const body = init?.body;
+      assert.ok(typeof body === 'string');
+      requests.push({ path: new URL(String(input)).pathname, body });
+      if (!online) throw new TypeError('Network unavailable');
+      const event = scheduledFeedingEventRequestSchema.parse(JSON.parse(body));
+      return Response.json({
+        feeding_id: event.feeding_id,
+        device_id: deviceId,
+        schedule_id: event.schedule_id,
+        source: event.source,
+        status: event.status,
+        actual_grams: event.actual_grams,
+        received_at: clock.now().toISOString(),
+      }, { status: 201 });
+    },
+  });
+  t.after(() => gateway.close());
+  const delivery = new OutboxDeliveryService({
+    deviceId,
+    store,
+    gateway,
+    clock,
+    logger: createJsonLogger({ level: 'error', sink: () => {} }),
+    pollIntervalMs: 1_000,
+    backoffInitialMs: 1_000,
+    backoffMaxMs: 1_000,
+  });
+
+  const result = await scheduler.tick(signal);
+  assert.equal(result.executedFeedings, 1);
+  assert.equal(result.queuedEvents, 1);
+  assert.deepEqual(requests, []);
+  const [queued] = store.listPendingOutbox(10, clock.now().toISOString(), ['scheduled_event']);
+  assert.ok(queued);
+  const event = scheduledFeedingEventRequestSchema.parse(JSON.parse(queued.payload));
+  const feeding = store.getFeeding(event.feeding_id);
+  assert.equal(feeding?.status, 'completed');
+  assert.equal(feeding.terminalPayload, queued.payload);
+  assert.equal(event.schedule_id, firstScheduleId);
+
+  const expectedRequest = { path: deviceApiPaths.feedingEvents(deviceId), body: queued.payload };
+  await delivery.tick(signal);
+  assert.deepEqual(requests, [expectedRequest]);
+  const retry = store.getOutboxMessage(queued.id);
+  assert.equal(retry?.attemptCount, 1);
+  assert.equal(retry.deliveredAt, null);
+  assert.equal(retry.failedAt, null);
+  assert.equal(retry.payload, queued.payload);
+
+  online = true;
+  await delivery.tick(signal);
+  assert.equal(requests.length, 1);
+  await clock.advanceTo(retry.nextAttemptAt);
+  await delivery.tick(signal);
+
+  assert.deepEqual(requests, [expectedRequest, expectedRequest]);
+  assert.deepEqual(store.getOutboxMessage(queued.id), { ...retry, deliveredAt: clock.now().toISOString(), lastError: null });
+  assert.deepEqual(store.listPendingOutbox(10, '2099-01-01T00:00:00.000Z', ['scheduled_event']), []);
+  assert.deepEqual(store.getFeeding(event.feeding_id), feeding);
+});
+
 test('scheduler is single-flight and skips another occurrence after max lateness', async (t) => {
   const harness = schedulerHarness(t, {
     now: '2026-11-23T08:30:01.000Z',
@@ -184,6 +265,7 @@ test('scheduler stops cleanly while waiting for the manual feeding lease', async
 interface SchedulerHarness {
   readonly store: SqliteLocalStore;
   readonly scheduler: LocalScheduler;
+  readonly clock: ReturnType<typeof createDigitalTwin>['clock'];
   readonly executionLock: ReturnType<typeof createDigitalTwin>['executionLock'];
 }
 
@@ -238,6 +320,7 @@ function schedulerHarness(
   });
   return {
     store,
+    clock: twin.clock,
     executionLock: twin.executionLock,
     scheduler: new LocalScheduler({
       store,
